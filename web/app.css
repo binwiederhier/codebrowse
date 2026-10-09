@@ -115,6 +115,13 @@ kbd { font: 12px var(--ui-font); color: var(--text-dim); }
 .row .no { position: sticky; left: 0; z-index: 2; flex: none; width: calc(var(--gw, 4) * 1ch + 38px); padding-right: 22px; text-align: right; color: #4B5059; background: var(--bg); user-select: none; }
 .row .tx { flex: none; padding-left: 6px; padding-right: 60px; }
 .row.cur { background: #26282E; }
+.row.mark { background: rgba(229,192,123,.10); }
+.row.mark .no { color: #E5C07B; background: #2A2822; box-shadow: inset -2px 0 0 #E5C07B; }
+.row.mark-first { box-shadow: inset 0 1px 0 rgba(229,192,123,.35); }
+.row.mark-last { box-shadow: inset 0 -1px 0 rgba(229,192,123,.35); }
+.row.mark-first.mark-last { box-shadow: inset 0 1px 0 rgba(229,192,123,.35), inset 0 -1px 0 rgba(229,192,123,.35); }
+.row.cur.mark { background: rgba(229,192,123,.16); }
+.rows .row .no { cursor: pointer; }
 .row.cur .no { color: #A1A3AB; background: #1E1F22; }
 .row.flash .tx { animation: flash 1.2s ease-out; }
 @keyframes flash { 0% { background: rgba(53,116,240,.35); } 100% { background: transparent; } }
@@ -192,6 +199,8 @@ kbd { font: 12px var(--ui-font); color: var(--text-dim); }
 .sb-crumbs .sep { color: var(--text-dimmer); }
 .sb-crumbs .ic { width: 14px; height: 14px; }
 .sb-right { display: flex; gap: 16px; white-space: nowrap; flex: none; }
+.sb-link { display: inline-flex; align-items: center; gap: 4px; color: var(--text-dim); font-size: 12px; }
+.sb-link:hover { color: var(--text); }
 .sb-gopls.busy::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #E5C07B; margin-right: 6px; animation: blink 1s steps(1) infinite; }
 .sb-gopls.ok::before { content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #5FB865; margin-right: 6px; }
 .sb-gopls.err { color: #F75464; }

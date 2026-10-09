@@ -234,7 +234,7 @@ async function loadProjects() {
   S.projects = await api('projects');
 }
 
-async function switchProject(pid, { restore = true } = {}) {
+async function switchProject(pid, { restore = true, skipActive = false } = {}) {
   saveSession();
   document.querySelectorAll('#editorWrap .code-scroll').forEach(el => el.remove());
   S.files.clear(); S.tabs = []; S.active = null; S.tree.clear(); S.treeSel = null; S.treeVersion = -1; S.status = {};
@@ -257,7 +257,7 @@ async function switchProject(pid, { restore = true } = {}) {
     S.pendingCarets = Object.fromEntries(tabs.map(t => [t.path, t]));
     renderTabs();
     const target = active && S.tabs.includes(active) ? active : S.tabs[0];
-    if (target) { const t = S.pendingCarets[target] || {}; openFile(target, { line: t.line, col: t.col, push: false, center: true }).catch(() => {}); }
+    if (target && !skipActive) { const t = S.pendingCarets[target] || {}; openFile(target, { line: t.line, col: t.col, push: false, center: true }).catch(() => {}); }
   }
 }
 
@@ -589,12 +589,22 @@ function buildEditor(f) {
   return el;
 }
 
+function mergeRanges(rs) {
+  const out = [];
+  for (const r of [...rs].sort((a, b) => a[0] - b[0])) {
+    const last = out[out.length - 1];
+    if (last && r[0] <= last[1] + 1) last[1] = Math.max(last[1], r[1]); else out.push([...r]);
+  }
+  return out;
+}
+
 function renderRows(f) {
   const parts = new Array(f.lines.length);
   for (let i = 0; i < f.lines.length; i++) parts[i] = rowHTML(f, i);
   f.rowsEl.innerHTML = parts.join('');
   f.rowEls = f.rowsEl.children;
   f.curRow = null;
+  renderMarks(f);
   if (f.el && f.el.isConnected) { placeCaret(f, false); updateSticky(f); renderHighlights(f); }
 }
 
@@ -965,6 +975,21 @@ function attachEditorEvents(f) {
     hidePopup();
     const sticky = e.target.closest('.sticky-rows .row');
     if (sticky) { e.preventDefault(); const l = +sticky.dataset.l; openFile(f.path, { line: l, col: 0, center: true }); return; }
+    const gutter = e.target.closest('.rows .row .no');
+    if (gutter) {
+      // GitHub-style line selection: click a line number, shift+click to extend, ctrl+click to add.
+      e.preventDefault();
+      el.focus({ preventScroll: true });
+      const l = +gutter.parentNode.dataset.l;
+      let ranges;
+      if (e.shiftKey && f.markAnchor != null) ranges = [[Math.min(f.markAnchor, l), Math.max(f.markAnchor, l)]];
+      else if ((e.ctrlKey || e.metaKey) && f.marks) ranges = mergeRanges([...f.marks, [l, l]]);
+      else { f.markAnchor = l; ranges = f.marks && f.marks.length === 1 && f.marks[0][0] === l && f.marks[0][1] === l ? null : [[l, l]]; }
+      setCaret(f, l, 0, { scroll: false });
+      setMarks(f, ranges);
+      recordHistory(true);
+      return;
+    }
     const pos = posFromPoint(f, e.clientX, e.clientY);
     if (!pos) return;
     if (e.ctrlKey || e.metaKey) {
@@ -1036,9 +1061,112 @@ let histTimer;
 function currentState() {
   const f = S.files.get(S.active);
   if (!f) return null;
-  return { pid: S.pid, path: f.path, line: f.caret.line, col: f.caret.col, top: f.el.scrollTop };
+  return { pid: S.pid, path: f.path, line: f.caret.line, col: f.caret.col, top: f.el.scrollTop, marks: f.marks || null };
 }
-function stateHash(st) { return '#' + new URLSearchParams({ p: st.pid, f: st.path, l: st.line + 1 }).toString(); }
+function stateHash(st) {
+  const l = st.marks && st.marks.length ? formatRanges(st.marks) : String(st.line + 1);
+  return '#' + new URLSearchParams({ p: st.pid, f: st.path, l }).toString();
+}
+
+// ---- deep links: #p=<project>&f=<path>&l=<lines>, lines like "42", "10-20" or "10-20,31,40-45"
+
+function parseRanges(spec) {
+  const out = [];
+  for (const part of String(spec || '').split(',')) {
+    const m = /^\s*L?(\d+)(?:\s*-\s*L?(\d+))?\s*$/i.exec(part);
+    if (!m) continue;
+    const a = +m[1], b = m[2] ? +m[2] : a;
+    out.push([Math.min(a, b) - 1, Math.max(a, b) - 1]);
+  }
+  return out.sort((x, y) => x[0] - y[0]);
+}
+const formatRanges = rs => rs.map(([a, b]) => a === b ? `${a + 1}` : `${a + 1}-${b + 1}`).join(',');
+
+// resolveLink accepts an absolute path, or a path relative to the project (p may then be omitted
+// when the path is absolute: the project containing it is picked).
+function resolveLink(hp) {
+  let pid = hp.get('p'), path = hp.get('f');
+  if (!path) return null;
+  if (!pid || !S.projects.some(p => p.id === pid)) {
+    const owner = S.projects.filter(p => path.startsWith(p.path + '/')).sort((a, b) => b.path.length - a.path.length)[0];
+    pid = owner ? owner.id : (S.pid || (S.projects[0] && S.projects[0].id));
+  }
+  const pr = S.projects.find(p => p.id === pid);
+  if (pr && !path.startsWith('/')) path = pr.path + '/' + path.replace(/^\.?\//, '');
+  return { pid, path, ranges: parseRanges(hp.get('l')) };
+}
+
+async function openDeepLink(link) {
+  if (!link) return;
+  if (link.pid !== S.pid) await switchProject(link.pid, { restore: false });
+  const first = link.ranges[0];
+  const f = await openFile(link.path, { line: first ? first[0] : 0, col: 0, push: false, center: true }).catch(() => null);
+  if (!f) return;
+  setMarks(f, link.ranges.length && (link.ranges.length > 1 || link.ranges[0][0] !== link.ranges[0][1]) ? link.ranges : (first ? [first] : null));
+  if (first) revealRange(f, first[0], link.ranges[link.ranges.length - 1][1]);
+  recordHistory(true);
+}
+
+// revealRange scrolls so the whole range is visible (centered), or its start near the top if it is too tall.
+function revealRange(f, a, b) {
+  const sc = f.el, view = sc.clientHeight, sticky = 3 * LH;
+  const top = a * LH, h = (b - a + 1) * LH;
+  sc.scrollTop = h + sticky < view ? top - (view - h) / 2 : top - sticky - LH;
+}
+
+function setMarks(f, ranges) {
+  f.marks = ranges && ranges.length ? ranges : null;
+  renderMarks(f);
+  updateLinkButton();
+}
+
+function renderMarks(f) {
+  if (!f.rowEls) return;
+  f.rowsEl.querySelectorAll('.row.mark').forEach(r => r.classList.remove('mark', 'mark-first', 'mark-last'));
+  for (const [a, b] of f.marks || []) {
+    for (let i = a; i <= b && i < f.rowEls.length; i++) f.rowEls[i].classList.add('mark');
+    if (f.rowEls[a]) f.rowEls[a].classList.add('mark-first');
+    if (f.rowEls[Math.min(b, f.rowEls.length - 1)]) f.rowEls[Math.min(b, f.rowEls.length - 1)].classList.add('mark-last');
+  }
+}
+
+// linkRanges: the marked lines, else the lines of a text selection inside the editor, else the caret line.
+function linkRanges(f) {
+  const sel = getSelection();
+  if (sel && !sel.isCollapsed && f.rowsEl.contains(sel.anchorNode) && f.rowsEl.contains(sel.focusNode)) {
+    const row = n => (n.nodeType === 3 ? n.parentNode : n).closest('.row');
+    const a = +row(sel.anchorNode).dataset.l, b = +row(sel.focusNode).dataset.l;
+    return [[Math.min(a, b), Math.max(a, b)]];
+  }
+  return f.marks || [[f.caret.line, f.caret.line]];
+}
+
+async function copyLink() {
+  const f = S.files.get(S.active);
+  if (!f) return;
+  const ranges = linkRanges(f);
+  if (!f.marks || formatRanges(ranges) !== formatRanges(f.marks)) setMarks(f, ranges);
+  recordHistory(true);
+  const url = location.origin + location.pathname + stateHash(currentState());
+  let ok = false;
+  try { await navigator.clipboard.writeText(url); ok = true; } catch {
+    // Clipboard API needs a secure context; plain http on an IP falls back to execCommand.
+    const ta = document.createElement('textarea');
+    ta.value = url; ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.select();
+    try { ok = document.execCommand('copy'); } catch { ok = false; }
+    ta.remove();
+  }
+  toast(ok ? `Copied link to ${basename(f.path)}:${formatRanges(ranges)}` : url, ok ? 2600 : 8000);
+}
+
+function updateLinkButton() {
+  const f = S.files.get(S.active);
+  const b = $('#sbLink');
+  if (!b) return;
+  b.classList.toggle('hidden', !f);
+  b.title = f && f.marks ? `Copy link to lines ${formatRanges(f.marks)} (Alt+Shift+C)` : 'Copy link to this line or selection (Alt+Shift+C)';
+}
 
 function recordHistory(replace) {
   const st = currentState();
@@ -1048,12 +1176,19 @@ function recordHistory(replace) {
 }
 function scheduleHistoryUpdate() { clearTimeout(histTimer); histTimer = setTimeout(() => recordHistory(true), 400); }
 
+// A link pasted into the address bar of an open tab only changes the hash.
+window.addEventListener('hashchange', () => {
+  if (history.state && history.state.path) return; // our own history entry, handled by popstate
+  openDeepLink(resolveLink(new URLSearchParams(location.hash.slice(1))));
+});
+
 window.addEventListener('popstate', async e => {
   const st = e.state;
   if (!st || !st.path) return;
   if (st.pid !== S.pid) await switchProject(st.pid, { restore: false });
   clearTimeout(histTimer);
   const f = await openFile(st.path, { line: st.line, col: st.col, push: false, center: true }).catch(() => null);
+  if (f) setMarks(f, st.marks || null);
   if (f && st.top != null) f.el.scrollTop = st.top;
 });
 
@@ -1326,7 +1461,8 @@ function openHelp() {
   const rows = [
     ['Ctrl+Click', 'Go to declaration (on a declaration: show usages)'], ['Ctrl+B', 'Go to declaration at caret'], ['Ctrl+G', 'Show usages of symbol at caret (jumps directly if only one)'],
     ['Ctrl+Alt+B', 'Go to implementation(s)'], ['Alt+← / Alt+→', 'Navigate back / forward (also Ctrl+Alt+← / →, mouse back)'], ['Double Shift / Ctrl+P', 'Search files (Tab: symbols, structure)'],
-    ['Ctrl+E', 'Recent files'], ['Ctrl+F12', 'File structure'], ['Alt+F1', 'Select opened file in project tree'],
+    ['Ctrl+E', 'Recent files'], ['Ctrl+F12', 'File structure'], ['Alt+F1', 'Select opened file in project tree'], ['Click / Shift+Click line number', 'Highlight a line / range (Ctrl+Click adds a range); the URL becomes a deep link'],
+    ['Alt+Shift+C', 'Copy deep link to the highlighted lines, selection or caret line'],
     ['Alt+1', 'Focus project tree'], ['Esc', 'Close popup / usages pane, back to editor'], ['Ctrl+F', 'Find in file (browser find)'],
     ['Hover', 'Quick documentation'], ['Middle-click tab', 'Close tab'],
   ];
@@ -1361,6 +1497,7 @@ async function pollStatus() {
 function updateStatusBar() {
   const f = S.files.get(S.active);
   $('#sbPos').textContent = f ? `${f.caret.line + 1}:${f.caret.col + 1}` : '';
+  updateLinkButton();
   $('#sbIndent').textContent = f ? f.indent : '';
   $('#tbBranchName').textContent = f && f.branch ? f.branch : '';
   $('#tbBranch').style.visibility = f && f.branch ? '' : 'hidden';
@@ -1409,6 +1546,7 @@ function initKeys() {
     else if (mod && !e.altKey && (k === 'p' || (e.shiftKey && k === 'n'))) { e.preventDefault(); openFinder('files'); }
     else if (mod && !e.altKey && k === 'e') { e.preventDefault(); openFinder('files'); }
     else if (mod && e.key === 'F12') { e.preventDefault(); openFinder('structure'); }
+    else if (e.altKey && e.shiftKey && !mod && k === 'c') { e.preventDefault(); copyLink(); }
     else if (e.altKey && !mod && e.key === 'F1') { e.preventDefault(); locateInTree(); }
     else if (e.altKey && !mod && e.key === '1') { e.preventDefault(); $('#tree').focus(); }
     else if (e.altKey && !mod && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) { e.preventDefault(); e.key === 'ArrowLeft' ? history.back() : history.forward(); }
@@ -1417,7 +1555,8 @@ function initKeys() {
       if (!$('#menu').classList.contains('hidden')) { hideMenu(); return; }
       if (!$('#popup').classList.contains('hidden')) { hidePopup(); return; }
       if (document.querySelector('.modal')) { closeFinder(); return; }
-      if (!$('#bottom').classList.contains('hidden')) { closeBottom(); }
+      if (!$('#bottom').classList.contains('hidden')) { closeBottom(); focusEditor(); return; }
+      if (f && f.marks) { setMarks(f, null); recordHistory(true); }
       focusEditor();
     }
   }, true);
@@ -1460,16 +1599,14 @@ async function boot() {
   $('#tbProject').addEventListener('click', e => openProjectMenu(e.currentTarget));
   $('#tbSearch').addEventListener('click', () => openFinder('files'));
   $('#tbHelp').addEventListener('click', openHelp);
+  $('#sbLink').addEventListener('click', copyLink);
   await document.fonts.ready.catch(() => {});
   await loadProjects();
-  const hp = new URLSearchParams(location.hash.slice(1));
-  let pid = hp.get('p') || store.get('project', null);
+  const link = resolveLink(new URLSearchParams(location.hash.slice(1)));
+  let pid = link ? link.pid : store.get('project', null);
   if (!S.projects.some(p => p.id === pid)) pid = S.projects[0] ? S.projects[0].id : null;
-  await switchProject(pid);
-  if (hp.get('f')) {
-    const line = Math.max(0, (+hp.get('l') || 1) - 1);
-    openFile(hp.get('f'), { line, col: 0, push: false, center: true }).then(() => recordHistory(true)).catch(() => {});
-  }
+  await switchProject(pid, { restore: true, skipActive: !!link });
+  if (link) await openDeepLink(link);
   if (!S.projects.length) addProjectDialog();
 }
 
