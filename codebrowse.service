@@ -1,0 +1,12 @@
+[Unit]
+Description=codebrowse - read-only Go code browser
+After=network-online.target
+
+[Service]
+ExecStart=%h/.local/bin/codebrowse
+Environment=PATH=%h/go/bin:%h/.local/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
