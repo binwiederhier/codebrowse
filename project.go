@@ -462,7 +462,12 @@ func (p *project) gopls() (*lspClient, error) {
 		p.lsp.touch()
 		return p.lsp, nil
 	}
-	l, err := startGopls(p.cfg.Path)
+	var env []string
+	if gw := syntheticGoWork(p.cfg.ID, p.cfg.Path); gw != "" {
+		env = append(env, "GOWORK="+gw)
+		slog.Info("using generated go.work", "project", p.cfg.ID, "gowork", gw)
+	}
+	l, err := startGopls(p.cfg.Path, env...)
 	if err != nil {
 		return nil, err
 	}

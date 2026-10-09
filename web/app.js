@@ -1061,11 +1061,13 @@ let histTimer;
 function currentState() {
   const f = S.files.get(S.active);
   if (!f) return null;
-  return { pid: S.pid, path: f.path, line: f.caret.line, col: f.caret.col, top: f.el.scrollTop, marks: f.marks || null };
+  return { pid: S.pid, path: f.path, line: f.caret.line, col: f.caret.col, top: f.el.scrollTop, marks: f.marks || null, tour: S.tour ? S.tour.raw : null, step: S.tour ? S.tour.step : null };
 }
 function stateHash(st) {
   const l = st.marks && st.marks.length ? formatRanges(st.marks) : String(st.line + 1);
-  return '#' + new URLSearchParams({ p: st.pid, f: st.path, l }).toString();
+  const q = { p: st.pid, f: st.path, l };
+  if (st.tour) { q.tour = st.tour; q.step = st.step + 1; }
+  return '#' + new URLSearchParams(q).toString();
 }
 
 // ---- deep links: #p=<project>&f=<path>&l=<lines>, lines like "42", "10-20" or "10-20,31,40-45"
@@ -1078,7 +1080,7 @@ function parseRanges(spec) {
     const a = +m[1], b = m[2] ? +m[2] : a;
     out.push([Math.min(a, b) - 1, Math.max(a, b) - 1]);
   }
-  return out.sort((x, y) => x[0] - y[0]);
+  return out; // author order: the first range is where a link or walkthrough step lands
 }
 const formatRanges = rs => rs.map(([a, b]) => a === b ? `${a + 1}` : `${a + 1}-${b + 1}`).join(',');
 
@@ -1086,24 +1088,29 @@ const formatRanges = rs => rs.map(([a, b]) => a === b ? `${a + 1}` : `${a + 1}-$
 // when the path is absolute: the project containing it is picked).
 function resolveLink(hp) {
   let pid = hp.get('p'), path = hp.get('f');
-  if (!path) return null;
+  const tour = hp.get('tour'), step = Math.max(0, (+hp.get('step') || 1) - 1);
+  if (!path) return tour ? { tour, step } : null;
   if (!pid || !S.projects.some(p => p.id === pid)) {
     const owner = S.projects.filter(p => path.startsWith(p.path + '/')).sort((a, b) => b.path.length - a.path.length)[0];
     pid = owner ? owner.id : (S.pid || (S.projects[0] && S.projects[0].id));
   }
   const pr = S.projects.find(p => p.id === pid);
   if (pr && !path.startsWith('/')) path = pr.path + '/' + path.replace(/^\.?\//, '');
-  return { pid, path, ranges: parseRanges(hp.get('l')) };
+  return { pid, path, ranges: parseRanges(hp.get('l')), tour, step };
 }
 
 async function openDeepLink(link) {
   if (!link) return;
+  if (link.tour) {
+    const ok = await loadTour(link.tour, link.step, !link.path);
+    if (!link.path || !ok) return;
+  }
   if (link.pid !== S.pid) await switchProject(link.pid, { restore: false });
   const first = link.ranges[0];
   const f = await openFile(link.path, { line: first ? first[0] : 0, col: 0, push: false, center: true }).catch(() => null);
   if (!f) return;
   setMarks(f, link.ranges.length && (link.ranges.length > 1 || link.ranges[0][0] !== link.ranges[0][1]) ? link.ranges : (first ? [first] : null));
-  if (first) revealRange(f, first[0], link.ranges[link.ranges.length - 1][1]);
+  if (first) revealRange(f, first[0], first[1]);
   recordHistory(true);
 }
 
@@ -1122,6 +1129,7 @@ function setMarks(f, ranges) {
 
 function renderMarks(f) {
   if (!f.rowEls) return;
+  renderTourBadges(f);
   f.rowsEl.querySelectorAll('.row.mark').forEach(r => r.classList.remove('mark', 'mark-first', 'mark-last'));
   for (const [a, b] of f.marks || []) {
     for (let i = a; i <= b && i < f.rowEls.length; i++) f.rowEls[i].classList.add('mark');
@@ -1189,6 +1197,7 @@ window.addEventListener('popstate', async e => {
   clearTimeout(histTimer);
   const f = await openFile(st.path, { line: st.line, col: st.col, push: false, center: true }).catch(() => null);
   if (f) setMarks(f, st.marks || null);
+  if (S.tour && st.tour === S.tour.raw && st.step != null) { S.tour.step = st.step; renderTour(); }
   if (f && st.top != null) f.el.scrollTop = st.top;
 });
 
@@ -1232,12 +1241,12 @@ async function showUsages(f, line, col) {
   const pending = setTimeout(() => { if (seq === usagesSeq) openBottom(title, '<div class="bmsg"><span class="spin"></span>Searching…</div>', ''); }, 250);
   let locs;
   try { locs = await api('references', { project: S.pid, path: f.path, line: w.line, char: w.start }); }
-  catch (e) { clearTimeout(pending); if (seq === usagesSeq) { closeBottom(); toast('gopls: ' + e.message); } return; }
+  catch (e) { clearTimeout(pending); if (seq === usagesSeq) { dismissUsages(); toast('gopls: ' + e.message); } return; }
   clearTimeout(pending);
   if (seq !== usagesSeq) return;
   const others = locs.filter(l => !(l.path === f.path && l.line === w.line && l.char === w.start));
-  if (!locs.length || !others.length) { closeBottom(); toast(locs.length ? `No other usages of ${w.word}` : `No usages of ${w.word} found`); return; }
-  if (locs.length === 1) { closeBottom(); const d = locs[0]; openFile(d.path, { line: d.line, col: d.char, center: true, target: d }); return; }
+  if (!locs.length || !others.length) { dismissUsages(); toast(locs.length ? `No other usages of ${w.word}` : `No usages of ${w.word} found`); return; }
+  if (locs.length === 1) { dismissUsages(); const d = locs[0]; openFile(d.path, { line: d.line, col: d.char, center: true, target: d }); return; }
   showLocations(title, locs);
 }
 
@@ -1268,19 +1277,42 @@ function showLocations(title, locs) {
   $('#bList').focus();
 }
 
+// The bottom tool window has two tabs: Walkthrough (when a tour is loaded) and Usages.
+const usagesHead = { title: '', count: '' };
+
 function openBottom(title, html, count) {
-  $('#bTitle').innerHTML = title;
-  $('#bCount').textContent = count;
+  usagesHead.title = title; usagesHead.count = count;
   $('#bList').innerHTML = html;
+  $('#bTabUsages').classList.remove('hidden');
+  showBottom('usages');
+}
+
+function showBottom(tab) {
+  S.bottomTab = tab;
   $('#bottom').classList.remove('hidden');
   $('#splitBottom').classList.remove('hidden');
-  const h = store.get('bottomH', 280);
-  $('#bottom').style.height = h + 'px';
+  $('#bottom').style.height = store.get('bottomH', 280) + 'px';
+  $('#bTabTour').classList.toggle('active', tab === 'tour');
+  $('#bTabUsages').classList.toggle('active', tab === 'usages');
+  $('#bList').classList.toggle('hidden', tab !== 'usages');
+  $('#bTour').classList.toggle('hidden', tab !== 'tour');
+  $('#tCtl').classList.toggle('hidden', tab !== 'tour');
+  if (tab === 'usages') { $('#bTitle').innerHTML = usagesHead.title; $('#bCount').textContent = usagesHead.count; }
+  else renderTourHead();
+  updateTourStatus();
+}
+
+// dismissUsages backs out of a usages search that showed nothing worth listing, without hiding
+// a walkthrough that shares the bottom panel.
+function dismissUsages() {
+  if (S.bottomTab !== 'usages') return;
+  if (S.tour) showBottom('tour'); else closeBottom();
 }
 
 function closeBottom() {
   $('#bottom').classList.add('hidden');
   $('#splitBottom').classList.add('hidden');
+  updateTourStatus();
 }
 
 function selectUsage(i, open) {
@@ -1305,6 +1337,9 @@ function initBottom() {
   });
   list.addEventListener('focus', () => { list.dataset.focus = '1'; });
   $('#bClose').addEventListener('click', () => { closeBottom(); focusEditor(); });
+  $('#bTabTour').addEventListener('click', () => showBottom('tour'));
+  $('#bTabUsages').addEventListener('click', () => showBottom('usages'));
+  initTour();
 }
 
 // ---------------------------------------------------------------- hover popup
@@ -1336,7 +1371,7 @@ function renderMarkdown(md) {
     if (i % 3 === 0) {
       const text = parts[i].replace(/^\s*---\s*$/gm, '').trim();
       if (!text) continue;
-      out += '<div class="doc">' + text.split(/\n{2,}/).map(par => '<p>' + inlineMd(par) + '</p>').join('') + '</div>';
+      out += '<div class="doc">' + mdBlocks(text) + '</div>';
     } else if (i % 3 === 2) {
       const lines = parts[i].replace(/\n$/, '').split('\n');
       const lang = parts[i - 1] || 'go';
@@ -1347,12 +1382,201 @@ function renderMarkdown(md) {
   return out;
 }
 
+// mdBlocks renders paragraphs, "-"/"*" and "1." lists and "#" headings.
+function mdBlocks(text) {
+  const out = [];
+  let list = null, para = [];
+  const flushPara = () => { if (para.length) out.push('<p>' + inlineMd(para.join('\n')) + '</p>'); para = []; };
+  const flushList = () => { if (list) out.push(`<${list.tag}>` + list.items.map(i => '<li>' + inlineMd(i) + '</li>').join('') + `</${list.tag}>`); list = null; };
+  for (const line of text.split('\n')) {
+    const ul = /^\s*[-*]\s+(.*)$/.exec(line), ol = /^\s*\d+[.)]\s+(.*)$/.exec(line), h = /^#{1,6}\s+(.*)$/.exec(line);
+    if (ul || ol) {
+      flushPara();
+      const tag = ul ? 'ul' : 'ol';
+      if (!list || list.tag !== tag) { flushList(); list = { tag, items: [] }; }
+      list.items.push((ul || ol)[1]);
+    } else if (h) { flushPara(); flushList(); out.push('<p><b>' + inlineMd(h[1]) + '</b></p>'); }
+    else if (!line.trim()) { flushPara(); flushList(); }
+    else if (list && /^\s{2,}\S/.test(line)) list.items[list.items.length - 1] += ' ' + line.trim();
+    else { flushList(); para.push(line); }
+  }
+  flushPara(); flushList();
+  return out.join('');
+}
+
 function inlineMd(s) {
   return esc(s)
     .replace(/`([^`]+)`/g, '<code>$1</code>')
     .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
+    // Code links: [text](L42), [text](L42-L50) or [text](path/to/file.go:42) open in the editor.
+    .replace(/\[([^\]]+)\]\(((?:[\w./-]+:)?L?\d+(?:-L?\d+)?)\)/g, (m, label, target) => `<a class="goto" data-goto="${target}">${label}</a>`)
     .replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>')
     .replace(/\n/g, ' ');
+}
+
+// ---------------------------------------------------------------- walkthroughs
+// A walkthrough ("tour") is JSON carried in the URL hash as tour=<value>, where value is either the
+// JSON itself or base64url(deflate-raw(JSON)) as printed by `codebrowse tour`:
+//   { "title": "...", "project": "<id|name|path>", "steps": [
+//       { "title": "...", "file": "rel/or/abs/path.go", "lines": "637-700,712", "note": "markdown" } ] }
+
+async function decodeTour(raw) {
+  const v = raw.trim();
+  if (v.startsWith('{')) return JSON.parse(v);
+  const b64 = v.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((v.length + 3) % 4);
+  const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+  const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+  return JSON.parse(await new Response(stream).text());
+}
+
+function tourProject(t) {
+  if (t.project) {
+    const want = String(t.project);
+    const p = S.projects.find(p => p.id === want || p.name === want || p.path === want.replace(/\/+$/, ''));
+    if (p) return p;
+  }
+  for (const st of t.steps) {
+    if (st.file && st.file.startsWith('/')) {
+      const p = S.projects.filter(p => st.file.startsWith(p.path + '/')).sort((a, b) => b.path.length - a.path.length)[0];
+      if (p) return p;
+    }
+  }
+  return proj();
+}
+
+// loadTour shows the walkthrough. With navigate it also opens the given step; otherwise the editor
+// stays where the rest of the link points (the user wandered off and reloaded).
+async function loadTour(raw, step, navigate) {
+  if (S.tour && S.tour.raw === raw) { if (navigate) goStep(step, { push: false }); return true; }
+  let t;
+  try { t = await decodeTour(raw); } catch (e) { toast('Invalid walkthrough link: ' + e.message, 6000); return false; }
+  if (!t || !Array.isArray(t.steps) || !t.steps.length) { toast('Walkthrough has no steps'); return false; }
+  const p = tourProject(t);
+  if (p && p.id !== S.pid) await switchProject(p.id, { restore: false });
+  const root = p ? p.path : '';
+  S.tour = {
+    raw, title: t.title || 'Walkthrough', step: Math.min(step, t.steps.length - 1), visited: new Set(),
+    steps: t.steps.map(st => ({
+      title: st.title || '', note: st.note || '', lines: String(st.lines || st.line || ''),
+      ranges: parseRanges(st.lines || st.line), rel: st.file || '',
+      path: !st.file ? null : st.file.startsWith('/') ? st.file : root + '/' + st.file.replace(/^\.?\//, ''),
+    })),
+  };
+  renderTour();
+  showBottom('tour');
+  if (navigate) await goStep(S.tour.step, { push: false });
+  return true;
+}
+
+async function goStep(i, { push = true } = {}) {
+  const t = S.tour;
+  if (!t) return;
+  i = Math.max(0, Math.min(t.steps.length - 1, i));
+  if (push) recordHistory(true); // snapshot the current position and step before moving on
+  t.step = i;
+  t.visited.add(i);
+  const st = t.steps[i];
+  renderTour();
+  if ($('#bottom').classList.contains('hidden') || S.bottomTab !== 'tour') showBottom('tour');
+  if (!st.path) { recordHistory(true); return; }
+  const first = st.ranges[0];
+  const f = await openFile(st.path, { line: first ? first[0] : 0, col: 0, center: true, push: false, focus: false }).catch(() => null);
+  if (!f || S.tour !== t || t.step !== i) return;
+  setMarks(f, st.ranges.length ? st.ranges : null);
+  if (first) revealRange(f, first[0], Math.max(...st.ranges.filter(r => r[0] - first[0] < 60).map(r => r[1])));
+  for (const g of S.files.values()) if (g && g !== f) renderTourBadges(g);
+  recordHistory(!push);
+}
+
+function endTour() {
+  S.tour = null;
+  $('#bTabTour').classList.add('hidden');
+  for (const f of S.files.values()) if (f) renderTourBadges(f);
+  if (S.bottomTab === 'tour') { if (!$('#bTabUsages').classList.contains('hidden')) showBottom('usages'); else closeBottom(); }
+  updateTourStatus();
+  recordHistory(true);
+}
+
+const stepLoc = st => st.rel ? `${basename(st.rel)}${st.lines ? ':' + st.lines : ''}` : '';
+
+function renderTour() {
+  const t = S.tour;
+  if (!t) return;
+  $('#bTabTour').classList.remove('hidden');
+  $('#tSteps').innerHTML = t.steps.map((st, i) => `<div class="tstep ${i === t.step ? 'active' : ''} ${t.visited.has(i) ? 'visited' : ''}" data-i="${i}">
+    <span class="tnum">${i + 1}</span><div class="tbody"><div class="ttl">${esc(st.title || stepLoc(st) || 'Step ' + (i + 1))}</div><div class="tloc" title="${esc(st.rel)}">${esc(st.rel ? dirname(st.rel) + (dirname(st.rel) ? '/' : '') + stepLoc(st) : '')}</div></div></div>`).join('');
+  const st = t.steps[t.step];
+  $('#tNote').innerHTML = `<h3>${esc(st.title || 'Step ' + (t.step + 1))}${st.rel ? `<span class="tloc">${esc(st.rel)}${st.lines ? ':' + esc(st.lines) : ''}</span>` : ''}</h3>` +
+    (st.note ? renderMarkdown(st.note) : '<div class="empty-note">No notes for this step.</div>');
+  $('#tNote').scrollTop = 0;
+  reveal($('#tSteps .tstep.active'), $('#tSteps'));
+  renderTourHead();
+  updateTourStatus();
+}
+
+function renderTourHead() {
+  const t = S.tour;
+  if (!t || S.bottomTab !== 'tour') return;
+  $('#bTitle').textContent = t.title;
+  $('#bCount').textContent = '';
+  $('#tPos').textContent = `${t.step + 1} / ${t.steps.length}`;
+  $('#tPrev').disabled = t.step === 0;
+  $('#tNext').disabled = t.step === t.steps.length - 1;
+}
+
+function updateTourStatus() {
+  const b = $('#sbTour');
+  const hidden = !S.tour || (!$('#bottom').classList.contains('hidden') && S.bottomTab === 'tour');
+  b.classList.toggle('hidden', !S.tour);
+  if (S.tour) $('#sbTourText').textContent = `${S.tour.title} · ${S.tour.step + 1}/${S.tour.steps.length}`;
+  b.style.opacity = hidden ? '.6' : '';
+}
+
+// renderTourBadges puts step numbers into the gutter of every step that starts in this file.
+function renderTourBadges(f) {
+  if (!f.rowEls) return;
+  f.rowsEl.querySelectorAll('.row[data-step]').forEach(r => { r.removeAttribute('data-step'); r.firstChild.removeAttribute('data-step'); r.classList.remove('tour-other'); });
+  if (!S.tour) return;
+  S.tour.steps.forEach((st, i) => {
+    if (st.path !== f.path || !st.ranges.length) return;
+    const row = f.rowEls[st.ranges[0][0]];
+    if (!row) return;
+    row.dataset.step = row.dataset.step ? row.dataset.step + ',' + (i + 1) : String(i + 1);
+    row.firstChild.dataset.step = row.dataset.step; // the gutter badge reads it via attr()
+    if (i !== S.tour.step) row.classList.add('tour-other'); else row.classList.remove('tour-other');
+  });
+}
+
+// gotoTarget resolves a note link: "L42", "L42-L50" (in the step's file) or "path:42".
+function gotoTarget(target) {
+  const t = S.tour;
+  const st = t && t.steps[t.step];
+  const m = /^(?:(.+):)?L?(\d+)(?:-L?(\d+))?$/.exec(target);
+  if (!m) return;
+  let path = st && st.path;
+  if (m[1]) {
+    const root = (tourProject({ steps: [] }) || {}).path || '';
+    path = m[1].startsWith('/') ? m[1] : root + '/' + m[1];
+    if (st && st.path && !m[1].includes('/')) path = dirname(st.path) + '/' + m[1];
+  }
+  if (!path) return;
+  const a = +m[2] - 1, b = m[3] ? +m[3] - 1 : a;
+  openFile(path, { line: a, col: 0, center: true }).then(f => { setMarks(f, [[a, b]]); revealRange(f, a, b); recordHistory(true); }).catch(() => {});
+}
+
+function initTour() {
+  $('#tSteps').addEventListener('click', e => { const r = e.target.closest('.tstep'); if (r) goStep(+r.dataset.i); });
+  $('#tSteps').addEventListener('keydown', e => {
+    if (!S.tour) return;
+    if (e.key === 'ArrowDown' || e.key === 'ArrowRight') { e.preventDefault(); goStep(S.tour.step + 1); }
+    else if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') { e.preventDefault(); goStep(S.tour.step - 1); }
+    else if (e.key === 'Enter') { e.preventDefault(); focusEditor(); }
+  });
+  $('#tPrev').addEventListener('click', () => S.tour && goStep(S.tour.step - 1));
+  $('#tNext').addEventListener('click', () => S.tour && goStep(S.tour.step + 1));
+  $('#tEnd').addEventListener('click', endTour);
+  $('#sbTour').addEventListener('click', () => showBottom('tour'));
+  $('#tNote').addEventListener('click', e => { const a = e.target.closest('a.goto'); if (a) { e.preventDefault(); gotoTarget(a.dataset.goto); } });
 }
 
 // ---------------------------------------------------------------- finder (search everywhere)
@@ -1462,7 +1686,7 @@ function openHelp() {
     ['Ctrl+Click', 'Go to declaration (on a declaration: show usages)'], ['Ctrl+B', 'Go to declaration at caret'], ['Ctrl+G', 'Show usages of symbol at caret (jumps directly if only one)'],
     ['Ctrl+Alt+B', 'Go to implementation(s)'], ['Alt+← / Alt+→', 'Navigate back / forward (also Ctrl+Alt+← / →, mouse back)'], ['Double Shift / Ctrl+P', 'Search files (Tab: symbols, structure)'],
     ['Ctrl+E', 'Recent files'], ['Ctrl+F12', 'File structure'], ['Alt+F1', 'Select opened file in project tree'], ['Click / Shift+Click line number', 'Highlight a line / range (Ctrl+Click adds a range); the URL becomes a deep link'],
-    ['Alt+Shift+C', 'Copy deep link to the highlighted lines, selection or caret line'],
+    ['Alt+Shift+C', 'Copy deep link to the highlighted lines, selection or caret line'], ['F8 / Shift+F8', 'Next / previous walkthrough step'],
     ['Alt+1', 'Focus project tree'], ['Esc', 'Close popup / usages pane, back to editor'], ['Ctrl+F', 'Find in file (browser find)'],
     ['Hover', 'Quick documentation'], ['Middle-click tab', 'Close tab'],
   ];
@@ -1516,7 +1740,7 @@ function updateStatusBar() {
   else if (st.gopls && st.gopls.startsWith('error')) { gtext = st.gopls; cls = 'err'; }
   else if (st.gopls && st.gopls !== 'stopped') { gtext = 'gopls: ' + st.gopls; cls = 'busy'; }
   else if (st.gopls === 'stopped') { gtext = 'gopls idle'; }
-  g.textContent = gtext; g.className = 'sb-gopls ' + cls;
+  g.textContent = gtext; g.title = gtext; g.className = 'sb-gopls ' + cls;
   $('#tbStatus').textContent = st.files != null ? `${st.files.toLocaleString()} files indexed` : '';
 }
 
@@ -1546,6 +1770,7 @@ function initKeys() {
     else if (mod && !e.altKey && (k === 'p' || (e.shiftKey && k === 'n'))) { e.preventDefault(); openFinder('files'); }
     else if (mod && !e.altKey && k === 'e') { e.preventDefault(); openFinder('files'); }
     else if (mod && e.key === 'F12') { e.preventDefault(); openFinder('structure'); }
+    else if (e.key === 'F8' && !mod && !e.altKey && S.tour) { e.preventDefault(); goStep(S.tour.step + (e.shiftKey ? -1 : 1)); }
     else if (e.altKey && e.shiftKey && !mod && k === 'c') { e.preventDefault(); copyLink(); }
     else if (e.altKey && !mod && e.key === 'F1') { e.preventDefault(); locateInTree(); }
     else if (e.altKey && !mod && e.key === '1') { e.preventDefault(); $('#tree').focus(); }
@@ -1603,9 +1828,9 @@ async function boot() {
   await document.fonts.ready.catch(() => {});
   await loadProjects();
   const link = resolveLink(new URLSearchParams(location.hash.slice(1)));
-  let pid = link ? link.pid : store.get('project', null);
+  let pid = link && link.pid ? link.pid : store.get('project', null);
   if (!S.projects.some(p => p.id === pid)) pid = S.projects[0] ? S.projects[0].id : null;
-  await switchProject(pid, { restore: true, skipActive: !!link });
+  await switchProject(pid, { restore: true, skipActive: !!(link && (link.path || link.tour)) });
   if (link) await openDeepLink(link);
   if (!S.projects.length) addProjectDialog();
 }

@@ -77,14 +77,14 @@ type lspClient struct {
 	initErr  error
 }
 
-func startGopls(root string) (*lspClient, error) {
+func startGopls(root string, env ...string) (*lspClient, error) {
 	bin, err := exec.LookPath("gopls")
 	if err != nil {
 		bin = filepath.Join(os.Getenv("HOME"), "go", "bin", "gopls")
 	}
 	cmd := exec.Command(bin)
 	cmd.Dir = root
-	cmd.Env = append(os.Environ(), "GOMEMLIMIT=2GiB")
+	cmd.Env = append(append(os.Environ(), "GOMEMLIMIT=2GiB"), env...)
 	in, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err

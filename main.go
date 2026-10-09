@@ -18,7 +18,14 @@ import (
 var webFS embed.FS
 
 func main() {
-	cfgPath := flag.String("config", filepath.Join(os.Getenv("HOME"), ".config", "codebrowse", "config.json"), "config file")
+	if len(os.Args) > 1 && os.Args[1] == "tour" {
+		if err := runTour(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+	cfgPath := flag.String("config", defaultConfigPath(), "config file")
 	printPassword := flag.Bool("print-password", false, "print the login password and exit")
 	flag.Parse()
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
@@ -60,4 +67,8 @@ func goEnv() (goroot, modcache string) {
 		return "", ""
 	}
 	return parts[0], parts[1]
+}
+
+func defaultConfigPath() string {
+	return filepath.Join(os.Getenv("HOME"), ".config", "codebrowse", "config.json")
 }

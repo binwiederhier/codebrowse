@@ -20,12 +20,13 @@ type projectConfig struct {
 }
 
 type config struct {
-	Listen   string           `json:"listen"`
-	Password string           `json:"password"`
-	Secret   string           `json:"secret"`
-	Projects []*projectConfig `json:"projects"`
-	Discover []string         `json:"discover"` // globs; each matching directory becomes a project
-	Hidden   []string         `json:"hidden"`   // discovered paths removed by the user
+	Listen    string           `json:"listen"`
+	PublicURL string           `json:"public_url,omitempty"` // base URL in printed links, e.g. http://devbox:7878
+	Password  string           `json:"password"`
+	Secret    string           `json:"secret"`
+	Projects  []*projectConfig `json:"projects"`
+	Discover  []string         `json:"discover"` // globs; each matching directory becomes a project
+	Hidden    []string         `json:"hidden"`   // discovered paths removed by the user
 
 	mu   sync.Mutex
 	path string
