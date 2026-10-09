@@ -59,6 +59,8 @@ func (s *server) routes(mux *http.ServeMux, static http.Handler) {
 	mux.HandleFunc("GET /api/typedefinition", s.handleLocations("textDocument/typeDefinition"))
 	mux.HandleFunc("GET /api/references", s.handleReferences)
 	mux.HandleFunc("GET /api/hover", s.handleHover)
+	mux.HandleFunc("GET /api/tours", s.handleTours)
+	mux.HandleFunc("DELETE /api/tours", s.handleDeleteTour)
 	mux.HandleFunc("GET /api/highlights", s.handleHighlights)
 }
 

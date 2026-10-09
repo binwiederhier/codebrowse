@@ -35,6 +35,7 @@ var rangeRe = regexp.MustCompile(`^L?(\d+)(?:-L?(\d+))?$`)
 func runTour(args []string) error {
 	fs := flag.NewFlagSet("tour", flag.ExitOnError)
 	cfgPath := fs.String("config", defaultConfigPath(), "config file")
+	noSave := fs.Bool("no-save", false, "don't add the tour to the Walkthroughs list in the UI")
 	base := fs.String("base", "", "base URL of the codebrowse server (default: public_url from the config)")
 	projectFlag := fs.String("project", "", "project id, name or path (default: the \"project\" field, or inferred from the file paths)")
 	fs.Usage = func() {
@@ -87,7 +88,13 @@ func runTour(args []string) error {
 	if baseURL == "" {
 		baseURL = cfg.baseURL()
 	}
-	fmt.Printf("%s/#tour=%s\n", baseURL, base64.RawURLEncoding.EncodeToString(buf.Bytes()))
+	encoded := base64.RawURLEncoding.EncodeToString(buf.Bytes())
+	if !*noSave {
+		if _, err := saveTour(cfg, &t, encoded); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: cannot save tour: %v\n", err)
+		}
+	}
+	fmt.Printf("%s/#tour=%s\n", baseURL, encoded)
 	fmt.Fprintf(os.Stderr, "%q: %d steps in project %s\n", t.Title, len(t.Steps), p.ID)
 	return nil
 }

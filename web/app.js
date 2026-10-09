@@ -1089,7 +1089,7 @@ const formatRanges = rs => rs.map(([a, b]) => a === b ? `${a + 1}` : `${a + 1}-$
 function resolveLink(hp) {
   let pid = hp.get('p'), path = hp.get('f');
   const tour = hp.get('tour'), step = Math.max(0, (+hp.get('step') || 1) - 1);
-  if (!path) return tour ? { tour, step } : null;
+  if (!path) return tour ? { tour, step } : (pid && S.projects.some(p => p.id === pid) ? { pid } : null);
   if (!pid || !S.projects.some(p => p.id === pid)) {
     const owner = S.projects.filter(p => path.startsWith(p.path + '/')).sort((a, b) => b.path.length - a.path.length)[0];
     pid = owner ? owner.id : (S.pid || (S.projects[0] && S.projects[0].id));
@@ -1101,6 +1101,7 @@ function resolveLink(hp) {
 
 async function openDeepLink(link) {
   if (!link) return;
+  if (!link.path && !link.tour) { if (link.pid !== S.pid) await switchProject(link.pid); return; }
   if (link.tour) {
     const ok = await loadTour(link.tour, link.step, !link.path);
     if (!link.path || !ok) return;
@@ -1296,7 +1297,13 @@ function showBottom(tab) {
   $('#bTabUsages').classList.toggle('active', tab === 'usages');
   $('#bList').classList.toggle('hidden', tab !== 'usages');
   $('#bTour').classList.toggle('hidden', tab !== 'tour');
-  $('#tCtl').classList.toggle('hidden', tab !== 'tour');
+  $('#tCtl').classList.toggle('hidden', tab !== 'tour' || !S.tour);
+  if (tab === 'tour') {
+    $('#tSteps').classList.toggle('hidden', !S.tour);
+    $('#tNote').classList.toggle('hidden', !S.tour);
+    $('#tList').classList.toggle('hidden', !!S.tour);
+    if (!S.tour) renderTourList();
+  }
   if (tab === 'usages') { $('#bTitle').innerHTML = usagesHead.title; $('#bCount').textContent = usagesHead.count; }
   else renderTourHead();
   updateTourStatus();
@@ -1488,13 +1495,49 @@ async function goStep(i, { push = true } = {}) {
   recordHistory(!push);
 }
 
+// endTour closes the current walkthrough and shows the list of saved ones.
 function endTour() {
   S.tour = null;
-  $('#bTabTour').classList.add('hidden');
-  for (const f of S.files.values()) if (f) renderTourBadges(f);
-  if (S.bottomTab === 'tour') { if (!$('#bTabUsages').classList.contains('hidden')) showBottom('usages'); else closeBottom(); }
-  updateTourStatus();
+  for (const f of S.files.values()) if (f) { renderTourBadges(f); if (f.marks) setMarks(f, null); }
+  showBottom('tour');
   recordHistory(true);
+}
+
+const timeAgo = d => {
+  const s = (Date.now() - new Date(d).getTime()) / 1000;
+  if (s < 60) return 'just now';
+  if (s < 3600) return Math.floor(s / 60) + ' min ago';
+  if (s < 86400) return Math.floor(s / 3600) + ' h ago';
+  return Math.floor(s / 86400) + ' d ago';
+};
+let tourItems = [], tourSel = 0;
+
+async function renderTourList() {
+  const el = $('#tList');
+  $('#bTitle').textContent = '';
+  $('#bCount').textContent = '';
+  let tours = [];
+  try { tours = await api('tours'); } catch { /* ignore */ }
+  if (S.tour) return;
+  const here = tours.filter(t => t.project === S.pid), other = tours.filter(t => t.project !== S.pid);
+  tourItems = [...here, ...other];
+  tourSel = Math.min(tourSel, Math.max(0, tourItems.length - 1));
+  const icon = '<svg viewBox="0 0 16 16" width="15" height="15"><circle cx="3.5" cy="12.5" r="1.8" fill="none" stroke="currentColor" stroke-width="1.2"/><circle cx="12.5" cy="3.5" r="1.8" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M5.2 12.5h4.3a2.5 2.5 0 000-5h-3a2.5 2.5 0 010-5h4.3" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>';
+  const row = (t, i) => {
+    const pn = (S.projects.find(p => p.id === t.project) || {}).name || t.project;
+    return `<div class="titem ${i === tourSel ? 'sel' : ''}" data-i="${i}"><span class="tic">${icon}</span><div class="tmain"><div class="ttitle">${esc(t.title)}</div><div class="tmeta">${t.steps} step${t.steps === 1 ? '' : 's'} · ${esc(pn)} · ${timeAgo(t.created)}</div></div><button class="icon-btn tdel" title="Delete walkthrough"><svg viewBox="0 0 16 16" width="13" height="13"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg></button></div>`;
+  };
+  let html = '';
+  if (here.length) html += `<div class="tgroup">This project</div>` + here.map((t, i) => row(t, i)).join('');
+  if (other.length) html += `<div class="tgroup">Other projects</div>` + other.map((t, i) => row(t, here.length + i)).join('');
+  html += `<div class="tempty">${tours.length ? '' : '<b>No walkthroughs yet.</b><br>'}A walkthrough is a guided tour through the code: each step highlights lines in a file and explains them. Ask your coding agent to <b>“make a codebrowse walkthrough of …”</b>; it writes the steps as JSON and runs <code>codebrowse tour &lt; tour.json</code>, which validates them and adds the tour here. Opening a <code>#tour=</code> link works too.</div>`;
+  el.innerHTML = html;
+}
+
+async function openSavedTour(i) {
+  const t = tourItems[i];
+  if (!t) return;
+  await loadTour(t.encoded, 0, true);
 }
 
 const stepLoc = st => st.rel ? `${basename(st.rel)}${st.lines ? ':' + st.lines : ''}` : '';
@@ -1502,7 +1545,10 @@ const stepLoc = st => st.rel ? `${basename(st.rel)}${st.lines ? ':' + st.lines :
 function renderTour() {
   const t = S.tour;
   if (!t) return;
-  $('#bTabTour').classList.remove('hidden');
+  $('#tSteps').classList.remove('hidden');
+  $('#tNote').classList.remove('hidden');
+  $('#tList').classList.add('hidden');
+  if (S.bottomTab === 'tour') $('#tCtl').classList.remove('hidden');
   $('#tSteps').innerHTML = t.steps.map((st, i) => `<div class="tstep ${i === t.step ? 'active' : ''} ${t.visited.has(i) ? 'visited' : ''}" data-i="${i}">
     <span class="tnum">${i + 1}</span><div class="tbody"><div class="ttl">${esc(st.title || stepLoc(st) || 'Step ' + (i + 1))}</div><div class="tloc" title="${esc(st.rel)}">${esc(st.rel ? dirname(st.rel) + (dirname(st.rel) ? '/' : '') + stepLoc(st) : '')}</div></div></div>`).join('');
   const st = t.steps[t.step];
@@ -1526,10 +1572,8 @@ function renderTourHead() {
 
 function updateTourStatus() {
   const b = $('#sbTour');
-  const hidden = !S.tour || (!$('#bottom').classList.contains('hidden') && S.bottomTab === 'tour');
-  b.classList.toggle('hidden', !S.tour);
-  if (S.tour) $('#sbTourText').textContent = `${S.tour.title} · ${S.tour.step + 1}/${S.tour.steps.length}`;
-  b.style.opacity = hidden ? '.6' : '';
+  b.classList.toggle('active', !!S.tour);
+  $('#sbTourText').textContent = S.tour ? `${S.tour.title} · ${S.tour.step + 1}/${S.tour.steps.length}` : 'Walkthroughs';
 }
 
 // renderTourBadges puts step numbers into the gutter of every step that starts in this file.
@@ -1575,7 +1619,30 @@ function initTour() {
   $('#tPrev').addEventListener('click', () => S.tour && goStep(S.tour.step - 1));
   $('#tNext').addEventListener('click', () => S.tour && goStep(S.tour.step + 1));
   $('#tEnd').addEventListener('click', endTour);
-  $('#sbTour').addEventListener('click', () => showBottom('tour'));
+  updateTourStatus();
+  $('#sbTour').addEventListener('click', () => {
+    if (!$('#bottom').classList.contains('hidden') && S.bottomTab === 'tour') closeBottom(); else showBottom('tour');
+  });
+  const list = $('#tList');
+  list.addEventListener('click', async e => {
+    const it = e.target.closest('.titem');
+    if (!it) return;
+    const i = +it.dataset.i;
+    if (e.target.closest('.tdel')) {
+      const t = tourItems[i];
+      if (!confirm(`Delete walkthrough "${t.title}"?`)) return;
+      await api('tours', { id: t.id }, { method: 'DELETE' }).catch(err => toast(err.message));
+      renderTourList();
+      return;
+    }
+    openSavedTour(i);
+  });
+  list.addEventListener('keydown', e => {
+    const move = d => { tourSel = Math.max(0, Math.min(tourItems.length - 1, tourSel + d)); list.querySelectorAll('.titem').forEach(r => r.classList.toggle('sel', +r.dataset.i === tourSel)); reveal(list.querySelector('.titem.sel'), list); };
+    if (e.key === 'ArrowDown') { e.preventDefault(); move(1); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); move(-1); }
+    else if (e.key === 'Enter') { e.preventDefault(); openSavedTour(tourSel); }
+  });
   $('#tNote').addEventListener('click', e => { const a = e.target.closest('a.goto'); if (a) { e.preventDefault(); gotoTarget(a.dataset.goto); } });
 }
 

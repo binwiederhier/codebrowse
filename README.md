@@ -89,6 +89,8 @@ codebrowse tour < tour.json
 # http://devbox:7878/#tour=<compressed tour>
 ```
 
+Every tour created this way is also saved to `~/.config/codebrowse/tours/`, and appears in the **Walkthroughs** list. To open the list, click Walkthroughs in the status bar or the Walkthroughs tab of the bottom panel. Pass `-no-save` to only print the link.
+
 The JSON is compressed (raw deflate + base64url), so a tour with 7 steps and short notes fits in about 2 KB. The links work in any browser that can reach the server. Set `public_url` in the config so the printed links use the right host name. You can also put the JSON in the link uncompressed: `#tour=<URL-encoded JSON>`.
 
 ## Requirements
