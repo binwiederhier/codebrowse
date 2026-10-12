@@ -1,10 +1,16 @@
 BIN := $(HOME)/.local/bin/codebrowse
 UNIT := $(HOME)/.config/systemd/user/codebrowse.service
 
-.PHONY: build check-deps install uninstall restart logs password
+.PHONY: build test check-deps install uninstall restart logs password
 
 build:
 	go build -o codebrowse .
+
+test:
+	go vet ./...
+	go test ./...
+	node --check web/app.js
+	node --test test/*.test.js
 
 check-deps:
 	@command -v go >/dev/null || { echo "go is not installed (need Go 1.24+)"; exit 1; }

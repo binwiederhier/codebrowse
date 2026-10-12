@@ -25,10 +25,25 @@ import (
 
 const (
 	maxFileSize    = 8 << 20
+	maxRawSize     = 32 << 20
 	maxGopls       = 2
 	goplsIdleLimit = 45 * time.Minute
 	cookieName     = "codebrowse"
 )
+
+// rawTypes are the file types /api/raw serves, so Markdown previews can show images. Anything
+// else (HTML in particular) is refused, since it would run in codebrowse's origin.
+var rawTypes = map[string]string{
+	".png":  "image/png",
+	".jpg":  "image/jpeg",
+	".jpeg": "image/jpeg",
+	".gif":  "image/gif",
+	".webp": "image/webp",
+	".avif": "image/avif",
+	".bmp":  "image/bmp",
+	".ico":  "image/x-icon",
+	".svg":  "image/svg+xml",
+}
 
 type server struct {
 	cfg       *config
@@ -50,6 +65,7 @@ func (s *server) routes(mux *http.ServeMux, static http.Handler) {
 	mux.HandleFunc("GET /api/tree", s.handleTree)
 	mux.HandleFunc("GET /api/find", s.handleFind)
 	mux.HandleFunc("GET /api/file", s.handleFile)
+	mux.HandleFunc("GET /api/raw", s.handleRaw)
 	mux.HandleFunc("GET /api/semantic", s.handleSemantic)
 	mux.HandleFunc("GET /api/hints", s.handleHints)
 	mux.HandleFunc("GET /api/symbols", s.handleSymbols)
@@ -460,6 +476,41 @@ func (s *server) handleFile(w http.ResponseWriter, r *http.Request) {
 		resp.Content = string(data)
 	}
 	writeJSON(w, resp)
+}
+
+// handleRaw serves an image file as-is, for <img> tags in rendered Markdown.
+func (s *server) handleRaw(w http.ResponseWriter, r *http.Request) {
+	if _, err := s.project(r); err != nil {
+		httpErr(w, http.StatusBadRequest, err)
+		return
+	}
+	path, err := s.allowed(r.FormValue("path"))
+	if err != nil {
+		httpErr(w, http.StatusForbidden, err)
+		return
+	}
+	ctype, ok := rawTypes[strings.ToLower(filepath.Ext(path))]
+	if !ok {
+		httpErr(w, http.StatusUnsupportedMediaType, errors.New("not an image"))
+		return
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		httpErr(w, http.StatusNotFound, err)
+		return
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil || fi.IsDir() || fi.Size() > maxRawSize {
+		httpErr(w, http.StatusBadRequest, errors.New("not a servable file"))
+		return
+	}
+	// SVGs can carry scripts; sandbox them in case one is opened directly rather than via <img>
+	w.Header().Set("Content-Type", ctype)
+	w.Header().Set("Content-Security-Policy", "sandbox")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", "no-cache")
+	http.ServeContent(w, r, "", fi.ModTime(), f)
 }
 
 // displayPath gives a project-relative path, or a GOROOT/module-cache relative one.

@@ -2,7 +2,7 @@
 // Codebrowse: read-only, IntelliJ-flavoured code browser backed by gopls.
 
 const $ = (s, el = document) => el.querySelector(s);
-const LH = 20;
+let LH = 20; // line height in px; follows the editor font size (zoom)
 const MAX_TABS = 20;
 
 // ---------------------------------------------------------------- utilities
@@ -236,7 +236,7 @@ async function loadProjects() {
 
 async function switchProject(pid, { restore = true, skipActive = false } = {}) {
   saveSession();
-  document.querySelectorAll('#editorWrap .code-scroll').forEach(el => el.remove());
+  document.querySelectorAll('#editorWrap .fview').forEach(el => el.remove());
   S.files.clear(); S.tabs = []; S.active = null; S.tree.clear(); S.treeSel = null; S.treeVersion = -1; S.status = {};
   S.pid = pid;
   const p = proj();
@@ -577,7 +577,6 @@ function rowHTML(f, i) {
 function buildEditor(f) {
   const el = document.createElement('div');
   el.className = 'code-scroll';
-  el.style.display = 'none';
   el.tabIndex = 0;
   el.style.setProperty('--gw', String(Math.max(3, String(f.lines.length).length)));
   el.innerHTML = '<div class="code-inner"><div class="sticky"><div class="sticky-rows"></div></div><div class="hls"></div><div class="rows"></div><div class="caret"></div></div>';
@@ -585,7 +584,12 @@ function buildEditor(f) {
   if (f.binary) { f.rowsEl.innerHTML = `<div class="binary-msg">${esc(f.lines.join('\n'))}</div>`; }
   else renderRows(f);
   attachEditorEvents(f);
-  $('#editorWrap').appendChild(el);
+  f.view = document.createElement('div');
+  f.view.className = 'fview';
+  f.view.style.display = 'none';
+  f.view.appendChild(el);
+  if (f.lang === 'md' && !f.binary) buildMarkdownPreview(f);
+  $('#editorWrap').appendChild(f.view);
   return el;
 }
 
@@ -658,6 +662,7 @@ async function reloadIfChanged(f) {
     f.el.style.setProperty('--gw', String(Math.max(3, String(f.lines.length).length)));
     f.caret.line = Math.min(f.caret.line, f.lines.length - 1);
     renderRows(f);
+    if (f.mdEl) renderMarkdownPreview(f);
     if (f.lang === 'go') loadSemantic(f);
   } catch { /* ignore */ } finally { f.checking = false; }
 }
@@ -693,11 +698,12 @@ async function openFile(path, opts = {}) {
 function activate(path) {
   S.active = path;
   const act = S.files.get(path);
-  for (const el of document.querySelectorAll('#editorWrap .code-scroll')) el.style.display = act && el === act.el ? '' : 'none';
+  for (const el of document.querySelectorAll('#editorWrap .fview')) el.style.display = act && el === act.view ? '' : 'none';
   showEmpty();
   renderTabs();
   updateStatusBar();
   const f = S.files.get(path);
+  if (f && f.lh !== LH) refreshZoomed(f);
   if (f) { updateCrumbs(); updateSticky(f); }
   const rel = relInProject(path);
   if (rel != null && treeRows().some(r => r.dataset.p === rel)) selectTreeRow(rel, true);
@@ -710,7 +716,7 @@ function closeTab(path, quiet) {
   if (i < 0) return;
   S.tabs.splice(i, 1);
   const f = S.files.get(path);
-  if (f) f.el.remove();
+  if (f) f.view.remove();
   S.files.delete(path);
   if (S.active === path) {
     S.active = null;
@@ -1052,7 +1058,7 @@ function editorKey(f, e) {
 
 function focusEditor() {
   const f = S.files.get(S.active);
-  if (f) f.el.focus({ preventScroll: true });
+  if (f) (f.mdEl && f.mdMode === 'preview' ? f.mdEl : f.el).focus({ preventScroll: true });
 }
 
 // ---------------------------------------------------------------- navigation history
@@ -1061,7 +1067,7 @@ let histTimer;
 function currentState() {
   const f = S.files.get(S.active);
   if (!f) return null;
-  return { pid: S.pid, path: f.path, line: f.caret.line, col: f.caret.col, top: f.el.scrollTop, marks: f.marks || null, tour: S.tour ? S.tour.raw : null, step: S.tour ? S.tour.step : null };
+  return { pid: S.pid, path: f.path, line: f.caret.line, col: f.caret.col, top: f.el.scrollTop, ptop: f.mdEl ? f.mdEl.scrollTop : null, marks: f.marks || null, tour: S.tour ? S.tour.raw : null, step: S.tour ? S.tour.step : null };
 }
 function stateHash(st) {
   const l = st.marks && st.marks.length ? formatRanges(st.marks) : String(st.line + 1);
@@ -1117,6 +1123,7 @@ async function openDeepLink(link) {
 
 // revealRange scrolls so the whole range is visible (centered), or its start near the top if it is too tall.
 function revealRange(f, a, b) {
+  if (f.mdEl && f.mdMode === 'preview') setMdMode(f, 'split', false);
   const sc = f.el, view = sc.clientHeight, sticky = 3 * LH;
   const top = a * LH, h = (b - a + 1) * LH;
   sc.scrollTop = h + sticky < view ? top - (view - h) / 2 : top - sticky - LH;
@@ -1200,6 +1207,7 @@ window.addEventListener('popstate', async e => {
   if (f) setMarks(f, st.marks || null);
   if (S.tour && st.tour === S.tour.raw && st.step != null) { S.tour.step = st.step; renderTour(); }
   if (f && st.top != null) f.el.scrollTop = st.top;
+  if (f && f.mdEl && st.ptop != null) f.mdEl.scrollTop = st.ptop;
 });
 
 // ---------------------------------------------------------------- go to declaration / usages
@@ -1419,6 +1427,280 @@ function inlineMd(s) {
     .replace(/\[([^\]]+)\]\(((?:[\w./-]+:)?L?\d+(?:-L?\d+)?)\)/g, (m, label, target) => `<a class="goto" data-goto="${target}">${label}</a>`)
     .replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>')
     .replace(/\n/g, ' ');
+}
+
+// ---------------------------------------------------------------- zoom
+// Ctrl+Scroll (or a trackpad pinch) zooms the editor font or the Markdown preview, not the page,
+// like IntelliJ. Both levels are remembered; Ctrl+0 resets the focused one.
+
+const CODE_SIZE = 13, CODE_SIZE_MIN = 8, CODE_SIZE_MAX = 32, MD_ZOOM_MIN = 0.5, MD_ZOOM_MAX = 3;
+let codeSize = CODE_SIZE, mdZoom = 1, wheelAcc = 0;
+
+function initZoom() {
+  codeSize = Math.min(CODE_SIZE_MAX, Math.max(CODE_SIZE_MIN, +store.get('codeSize', CODE_SIZE) || CODE_SIZE));
+  mdZoom = Math.min(MD_ZOOM_MAX, Math.max(MD_ZOOM_MIN, +store.get('mdZoom', 1) || 1));
+  applyZoom();
+  $('#editorWrap').addEventListener('wheel', e => {
+    if (!e.ctrlKey && !e.metaKey) return;
+    const f = S.files.get(S.active);
+    const pane = f && (f.mdEl && f.mdEl.contains(e.target) ? 'preview' : f.el.contains(e.target) ? 'code' : null);
+    if (!pane) return;
+    e.preventDefault();
+    const dy = Math.max(-100, Math.min(100, e.deltaMode === 1 ? e.deltaY * 40 : e.deltaY));
+    if (pane === 'preview') { setMdZoom(f, mdZoom * Math.exp(-dy * 0.0015), e.clientY); return; }
+    // A mouse wheel notch is one step; small trackpad deltas add up to one
+    if (Math.abs(dy) >= 50) wheelAcc = dy; else wheelAcc += dy;
+    if (Math.abs(wheelAcc) < 25) return;
+    const step = wheelAcc < 0 ? 1 : -1;
+    wheelAcc = 0;
+    setCodeSize(f, codeSize + step, e.clientY);
+  }, { passive: false });
+}
+
+function applyZoom() {
+  LH = Math.round(codeSize * 20 / CODE_SIZE);
+  const st = document.documentElement.style;
+  st.setProperty('--code-size', codeSize + 'px');
+  st.setProperty('--lh', LH + 'px');
+  st.setProperty('--mdzoom', String(mdZoom));
+}
+
+// setCodeSize changes the editor font size, keeping the line under clientY in place.
+function setCodeSize(f, size, clientY) {
+  size = Math.min(CODE_SIZE_MAX, Math.max(CODE_SIZE_MIN, size));
+  if (size === codeSize) return;
+  const sc = f.el, y = clientY != null ? clientY - sc.getBoundingClientRect().top : 0;
+  const line = (sc.scrollTop + y) / LH;
+  codeSize = size;
+  store.set('codeSize', size);
+  applyZoom();
+  sc.scrollTop = line * LH - y;
+  refreshZoomed(f);
+  toast(`Editor font ${size}px (Ctrl+0 resets)`, 1200);
+}
+
+// refreshZoomed repositions what is laid out in pixels after the line height changed.
+function refreshZoomed(f) {
+  f.lh = LH;
+  placeCaret(f, false); updateSticky(f); renderHighlights(f);
+}
+
+// setMdZoom zooms the Markdown preview, keeping the content under clientY in place.
+function setMdZoom(f, z, clientY) {
+  z = Math.min(MD_ZOOM_MAX, Math.max(MD_ZOOM_MIN, Math.round(z * 100) / 100));
+  if (z === mdZoom) return;
+  const pv = f.mdEl, y = clientY != null ? clientY - pv.getBoundingClientRect().top : 0;
+  const ratio = z / mdZoom;
+  mdZoom = z;
+  store.set('mdZoom', z);
+  applyZoom();
+  pv.scrollTop = (pv.scrollTop + y) * ratio - y;
+  toast(`Preview zoom ${Math.round(z * 100)}% (Ctrl+0 resets)`, 1200);
+}
+
+function resetZoom(f) {
+  if (f.mdEl && document.activeElement === f.mdEl) setMdZoom(f, 1);
+  else setCodeSize(f, CODE_SIZE);
+}
+
+// ---------------------------------------------------------------- markdown preview
+// Markdown files get a preview next to the source, like IntelliJ: source only, side by side, or
+// rendered only. The last picked mode is the default for files opened later.
+
+const MERMAID_SRC = 'vendor/mermaid-11.17.2.min.js';
+const MD_MODES = [
+  { id: 'source', title: 'Source', icon: '<svg viewBox="0 0 16 16" width="14" height="14"><path d="M3 4h10M3 7h7M3 10h10M3 13h5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>' },
+  { id: 'split', title: 'Side by side', icon: '<svg viewBox="0 0 16 16" width="14" height="14"><rect x="1.8" y="2.8" width="12.4" height="10.4" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M8 3v10" stroke="currentColor" stroke-width="1.2"/></svg>' },
+  { id: 'preview', title: 'Rendered', icon: '<svg viewBox="0 0 16 16" width="14" height="14"><path d="M1.5 8S3.9 3.5 8 3.5 14.5 8 14.5 8 12.1 12.5 8 12.5 1.5 8 1.5 8z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><circle cx="8" cy="8" r="2" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>' },
+];
+const FENCE_LANGS = { go: 'go', golang: 'go', js: 'js', javascript: 'js', ts: 'js', typescript: 'js', jsx: 'js', tsx: 'js', json: 'json', jsonc: 'json', yaml: 'yaml', yml: 'yaml', toml: 'toml', ini: 'toml', py: 'py', python: 'py', sh: 'sh', bash: 'sh', shell: 'sh', zsh: 'sh', console: 'sh', dockerfile: 'sh', sql: 'sql', c: 'c', cpp: 'c', 'c++': 'c', java: 'c', kotlin: 'c', swift: 'c', cs: 'c', csharp: 'c', rust: 'rs', rs: 'rs', css: 'css', scss: 'css', proto: 'proto', protobuf: 'proto', make: 'make', makefile: 'make', md: 'md', markdown: 'md', gomod: 'go.mod' };
+
+function buildMarkdownPreview(f) {
+  f.mdMode = store.get('mdMode', 'split');
+  const pv = document.createElement('div');
+  pv.className = 'md-preview';
+  pv.tabIndex = 0;
+  pv.innerHTML = '<div class="md-body"></div>';
+  const split = document.createElement('div');
+  split.className = 'md-split';
+  const bar = document.createElement('div');
+  bar.className = 'md-modes';
+  bar.innerHTML = MD_MODES.map(m => `<button data-m="${m.id}" title="${m.title}">${m.icon}</button>`).join('');
+  bar.addEventListener('click', e => { const b = e.target.closest('button'); if (b) setMdMode(f, b.dataset.m, true); });
+  f.view.append(pv, split, bar);
+  f.mdEl = pv;
+  f.view.style.setProperty('--mdsplit', store.get('mdSplit', 50) + '%');
+  drag(split, (dx, start) => {
+    const pct = Math.max(15, Math.min(85, (start + dx) / f.view.clientWidth * 100));
+    f.view.style.setProperty('--mdsplit', pct + '%'); store.set('mdSplit', pct);
+  }, () => split.offsetLeft, 'x');
+  pv.addEventListener('click', e => previewClick(f, e));
+  pv.addEventListener('scroll', () => syncScroll(f, 'preview'), { passive: true });
+  f.el.addEventListener('scroll', () => syncScroll(f, 'source'), { passive: true });
+  renderMarkdownPreview(f);
+  applyMdMode(f);
+}
+
+function setMdMode(f, mode, remember) {
+  if (f.mdMode === mode) return;
+  f.mdMode = mode;
+  if (remember) store.set('mdMode', mode);
+  applyMdMode(f);
+  if (mode !== 'preview') { placeCaret(f, false); updateSticky(f); renderHighlights(f); }
+  if (mode === 'split') syncScroll(f, 'source');
+  focusEditor();
+}
+
+function applyMdMode(f) {
+  f.view.dataset.md = f.mdMode;
+  for (const b of f.view.querySelectorAll('.md-modes button')) b.classList.toggle('on', b.dataset.m === f.mdMode);
+}
+
+function renderMarkdownPreview(f) {
+  const body = $('.md-body', f.mdEl);
+  body.replaceChildren(sanitizeMarkdownHTML(renderMarkdownDoc(f.lines.join('\n'), { highlight: highlightFence })));
+  for (const img of body.querySelectorAll('img[src]')) {
+    const src = img.getAttribute('src');
+    img.loading = 'lazy';
+    if (!/^([a-z][\w+.-]*:|\/\/)/i.test(src)) img.src = '/api/raw?' + new URLSearchParams({ project: S.pid, path: mdResolve(f, src.split(/[?#]/)[0]) });
+  }
+  for (const a of body.querySelectorAll('a[href]')) {
+    const href = a.getAttribute('href');
+    if (/^([a-z][\w+.-]*:|\/\/)/i.test(href)) { a.target = '_blank'; a.rel = 'noopener noreferrer'; continue; }
+    if (href.startsWith('#')) continue;
+    // Relative links open in codebrowse; the href is a deep link so middle-click and Copy Link work
+    const [p, frag = ''] = href.split('#');
+    const path = mdResolve(f, p);
+    const lm = /^L(\d+)(?:-L?(\d+))?$/.exec(frag);
+    a.dataset.path = path;
+    a.dataset.frag = frag;
+    a.href = '#' + new URLSearchParams({ p: S.pid, f: path, ...(lm ? { l: lm[2] ? `${lm[1]}-${lm[2]}` : lm[1] } : {}) });
+  }
+  renderMermaid(body);
+}
+
+function highlightFence(code, lang) {
+  const key = FENCE_LANGS[lang];
+  if (!key) return esc(code);
+  const lines = code.split('\n');
+  const fake = { lines, lex: key === 'go' ? lexGo(lines) : lexGeneric(lines, key), sem: null, hints: null };
+  return lines.map((_, j) => lineHTML(fake, j)).join('\n');
+}
+
+// mdResolve resolves a link in a Markdown file like GitHub: relative to the file, or to the project
+// root when it starts with "/".
+function mdResolve(f, href) {
+  const root = proj() ? proj().path : '';
+  let path = decodeURIComponent(href);
+  path = path.startsWith('/') && root && !path.startsWith(root + '/') ? root + path : (path.startsWith('/') ? path : dirname(f.path) + '/' + path);
+  const out = [];
+  for (const seg of path.split('/')) {
+    if (seg === '..') out.pop();
+    else if (seg && seg !== '.') out.push(seg);
+  }
+  return '/' + out.join('/');
+}
+
+function previewClick(f, e) {
+  const a = e.target.closest('a[href]');
+  if (!a || e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey) return;
+  const href = a.getAttribute('href');
+  if (a.target === '_blank') return;
+  e.preventDefault();
+  if (!a.dataset.path) { if (href.length > 1) scrollToAnchor(f, decodeURIComponent(href.slice(1))); return; }
+  const frag = a.dataset.frag, lm = /^L(\d+)(?:-L?(\d+))?$/.exec(frag);
+  if (lm) {
+    const s = +lm[1] - 1, t = lm[2] ? +lm[2] - 1 : s;
+    openFile(a.dataset.path, { line: s, col: 0, center: true }).then(nf => { setMarks(nf, [[s, t]]); revealRange(nf, s, t); recordHistory(true); }).catch(() => {});
+  } else {
+    openFile(a.dataset.path).then(nf => { if (frag && nf.mdEl) scrollToAnchor(nf, frag); }).catch(() => {});
+  }
+}
+
+function scrollToAnchor(f, name) {
+  const body = $('.md-body', f.mdEl);
+  const el = body.querySelector(`[data-anchor="${CSS.escape(name)}"]`) || body.querySelector(`[data-anchor="${CSS.escape(name.toLowerCase())}"]`);
+  if (!el) return;
+  f.mdEl.scrollTop += el.getBoundingClientRect().top - f.mdEl.getBoundingClientRect().top - 12;
+}
+
+// syncScroll keeps source and preview aligned in side-by-side mode, interpolating between the
+// source lines of the rendered blocks (data-line).
+function syncScroll(f, from) {
+  if (f.mdMode !== 'split' || f.syncIgnore === from) return;
+  const pv = f.mdEl, base = pv.getBoundingClientRect().top - pv.scrollTop;
+  const pts = [[0, 0]];
+  for (const el of pv.querySelectorAll('[data-line]')) {
+    const y = el.getBoundingClientRect().top - base, last = pts[pts.length - 1];
+    if (+el.dataset.line > last[0] && y >= last[1]) pts.push([+el.dataset.line, y]);
+  }
+  pts.push([Math.max(f.lines.length, pts[pts.length - 1][0] + 1), pv.scrollHeight]);
+  const [a, b] = from === 'source' ? [0, 1] : [1, 0];
+  const v = from === 'source' ? f.el.scrollTop / LH : pv.scrollTop;
+  let i = 0;
+  while (i < pts.length - 2 && pts[i + 1][a] <= v) i++;
+  const p = pts[i], q = pts[i + 1];
+  const out = p[b] + (q[a] > p[a] ? (v - p[a]) / (q[a] - p[a]) : 0) * (q[b] - p[b]);
+  f.syncIgnore = from === 'source' ? 'preview' : 'source';
+  clearTimeout(f.syncTimer);
+  f.syncTimer = setTimeout(() => { f.syncIgnore = null; }, 100);
+  if (from === 'source') pv.scrollTop = out; else f.el.scrollTop = out * LH;
+}
+
+// Mermaid is ~3.5 MB, so it is only loaded once a diagram is shown. Renders are serialized
+// because mermaid.render is not reentrant.
+let mermaidLoad = null, mermaidQueue = Promise.resolve(), mermaidSeq = 0;
+const mermaidCache = new Map(); // diagram source -> svg
+
+function loadMermaid() {
+  if (!mermaidLoad) mermaidLoad = new Promise((resolve, reject) => {
+    const sc = document.createElement('script');
+    sc.src = MERMAID_SRC;
+    sc.onload = () => {
+      window.mermaid.initialize({ startOnLoad: false, theme: 'dark', securityLevel: 'strict', fontFamily: 'Inter, sans-serif' });
+      resolve(window.mermaid);
+    };
+    sc.onerror = () => { mermaidLoad = null; reject(new Error('cannot load mermaid')); };
+    document.head.appendChild(sc);
+  });
+  return mermaidLoad;
+}
+
+function renderMermaid(root) {
+  const blocks = [...root.querySelectorAll('.mermaid-block')];
+  if (!blocks.length) return;
+  mermaidQueue = mermaidQueue.then(async () => {
+    let m;
+    try { m = await loadMermaid(); }
+    catch (err) { for (const b of blocks) mermaidError(b, err.message); return; }
+    for (const b of blocks) {
+      if (!b.isConnected) continue;
+      const src = b.querySelector('.mermaid-src').textContent;
+      try {
+        let svg = mermaidCache.get(src);
+        if (!svg) { svg = (await m.render('cb-mermaid-' + (++mermaidSeq), src)).svg; mermaidCache.set(src, svg); }
+        const d = document.createElement('div');
+        d.className = 'mermaid-svg';
+        d.innerHTML = svg;
+        // Shrink wide diagrams to fit, but not below 60%; past that the block scrolls instead
+        const vb = d.firstElementChild && d.firstElementChild.viewBox && d.firstElementChild.viewBox.baseVal;
+        if (vb && vb.width) d.firstElementChild.style.minWidth = Math.round(vb.width * 0.6) + 'px';
+        b.prepend(d);
+        b.classList.add('done');
+      } catch (err) {
+        mermaidError(b, 'Mermaid: ' + (err && err.message ? err.message : err));
+        document.getElementById('dcb-mermaid-' + mermaidSeq)?.remove();
+      }
+    }
+  });
+}
+
+function mermaidError(b, msg) {
+  const d = document.createElement('div');
+  d.className = 'mermaid-err';
+  d.textContent = msg;
+  b.prepend(d);
+  b.classList.add('done', 'error');
 }
 
 // ---------------------------------------------------------------- walkthroughs
@@ -1755,7 +2037,7 @@ function openHelp() {
     ['Ctrl+E', 'Recent files'], ['Ctrl+F12', 'File structure'], ['Alt+F1', 'Select opened file in project tree'], ['Click / Shift+Click line number', 'Highlight a line / range (Ctrl+Click adds a range); the URL becomes a deep link'],
     ['Alt+Shift+C', 'Copy deep link to the highlighted lines, selection or caret line'], ['F8 / Shift+F8', 'Next / previous walkthrough step'],
     ['Alt+1', 'Focus project tree'], ['Esc', 'Close popup / usages pane, back to editor'], ['Ctrl+F', 'Find in file (browser find)'],
-    ['Hover', 'Quick documentation'], ['Middle-click tab', 'Close tab'],
+    ['Hover', 'Quick documentation'], ['Ctrl+Scroll', 'Zoom the editor font or the Markdown preview (Ctrl+0 resets)'], ['Middle-click tab', 'Close tab'],
   ];
   m.innerHTML = `<div class="help"><h2>Keyboard shortcuts</h2>${rows.map(r => `<kbd>${esc(r[0])}</kbd><span>${esc(r[1])}</span>`).join('')}</div>`;
   document.body.appendChild(m);
@@ -1840,6 +2122,7 @@ function initKeys() {
     else if (e.key === 'F8' && !mod && !e.altKey && S.tour) { e.preventDefault(); goStep(S.tour.step + (e.shiftKey ? -1 : 1)); }
     else if (e.altKey && e.shiftKey && !mod && k === 'c') { e.preventDefault(); copyLink(); }
     else if (e.altKey && !mod && e.key === 'F1') { e.preventDefault(); locateInTree(); }
+    else if (mod && !e.altKey && !e.shiftKey && e.key === '0' && f && $('#editorWrap').contains(document.activeElement)) { e.preventDefault(); resetZoom(f); }
     else if (e.altKey && !mod && e.key === '1') { e.preventDefault(); $('#tree').focus(); }
     else if (e.altKey && !mod && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) { e.preventDefault(); e.key === 'ArrowLeft' ? history.back() : history.forward(); }
     else if (mod && e.altKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) { e.preventDefault(); e.key === 'ArrowLeft' ? history.back() : history.forward(); }
@@ -1886,6 +2169,7 @@ function drag(handle, onMove, getStart, axis) {
 // ---------------------------------------------------------------- boot
 
 async function boot() {
+  initZoom();
   initTree(); initTabs(); initBottom(); initKeys(); initSplitters();
   $('#projBtn').addEventListener('click', e => openProjectMenu(e.currentTarget));
   $('#tbProject').addEventListener('click', e => openProjectMenu(e.currentTarget));

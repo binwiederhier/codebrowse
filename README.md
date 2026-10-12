@@ -4,7 +4,7 @@ A small, read-only, IntelliJ-style code browser for Go that runs in your browser
 
 ![codebrowse](docs/screenshot.png)
 
-It is a single Go binary with no dependencies outside the standard library. The frontend is embedded and written in plain JavaScript with no build step. All navigation comes from [gopls](https://pkg.go.dev/golang.org/x/tools/gopls), Go's language server, so go-to-definition and find-usages are type-accurate, including across modules in a `go.work` and into the standard library or module cache.
+It is a single Go binary with no dependencies outside the standard library. The frontend is embedded and written in plain JavaScript with no build step. The only third-party code is a vendored copy of Mermaid, which is loaded when a Markdown preview shows a diagram. All navigation comes from [gopls](https://pkg.go.dev/golang.org/x/tools/gopls), Go's language server, so go-to-definition and find-usages are type-accurate, including across modules in a `go.work` and into the standard library or module cache.
 
 ## Features
 
@@ -30,8 +30,14 @@ It is a single Go binary with no dependencies outside the standard library. The 
   - Click a line number to highlight that line. Shift+click extends the range and Ctrl+click adds another one, as on GitHub.
   - **Copy Link** in the status bar, or Alt+Shift+C, copies a link to the highlighted lines, the selection or the caret line.
 - **Walkthroughs**: one link opens a step-by-step tour through the code. See [Walkthroughs](#walkthroughs).
+- **Markdown preview**: as in IntelliJ, the buttons at the top right of a Markdown file switch between source, side by side and rendered.
+  - Renders GitHub-flavoured Markdown: tables, task lists, fenced code with syntax highlighting, images from the repo, and [Mermaid](https://mermaid.js.org) diagrams.
+  - In side-by-side mode the two panes scroll together, and the divider can be dragged.
+  - Relative links open the file in codebrowse; `file.go#L10-L20` highlights those lines and `other.md#section` jumps to that heading.
+  - The last mode you picked is used for the next Markdown file you open.
+- **Zoom**: Ctrl+Scroll (or pinch) over the editor or the Markdown preview zooms just that pane, not the whole page. Ctrl+0 resets it.
 
-Other file types (Markdown, YAML, JS/TS, SQL, proto, …) get basic syntax highlighting but no navigation.
+Other file types (YAML, JS/TS, SQL, proto, …) get basic syntax highlighting but no navigation.
 
 When a project root holds several Go modules but no `go.work` (for example a directory of checked-out repos), codebrowse generates a `go.work` covering every module inside a git checkout. It points gopls at that file, so navigation and usages work across the repos.
 
@@ -159,8 +165,11 @@ codebrowse serves source code, so treat it like SSH access:
 
 ## Development
 
+How it works inside, with diagrams: [docs/](docs/README.md) ([architecture](docs/architecture.md), [frontend](docs/frontend.md)).
+
 ```sh
 go build -o codebrowse . && ./codebrowse -config /tmp/cb.json   # run a dev instance with its own config
+make test                                                       # go vet, Go tests and the Markdown renderer tests (node --test)
 make restart                                                    # deploy to the user service
 ```
 
@@ -174,6 +183,8 @@ make restart                                                    # deploy to the 
 | `gowork.go` | The generated `go.work` for directories of repos. |
 | `tour.go` | `codebrowse tour`: validates a walkthrough and prints its link. |
 | `web/` | The UI: `index.html`, `app.css`, `app.js`. |
+| `web/markdown.js` | The Markdown preview renderer and its HTML sanitizer. Tests are in `test/`. |
+| `web/vendor/` | Mermaid (MIT), vendored as a single file so diagrams render without internet access. |
 
 ## Instructions for Claude (AI coding agents)
 
@@ -213,8 +224,8 @@ When codebrowse is installed and you explain code to the user, link to it instea
 - **Always verify line numbers.** Read the files first. `codebrowse tour` refuses ranges that don't exist, but it can't tell when a range points at the wrong function.
 
 When changing the code:
-- The backend is stdlib-only Go and the frontend is dependency-free JavaScript. Keep it that way; don't add npm packages or Go modules without asking.
-- Run `go vet ./...` and `node --check web/app.js` before `make restart`.
+- The backend is stdlib-only Go and the frontend is dependency-free JavaScript (apart from the vendored Mermaid). Keep it that way; don't add npm packages or Go modules without asking.
+- Run `make test` before `make restart`.
 - To check UI changes, drive a real browser (for example with Playwright) against a dev instance on another port. Don't only reason about the code.
 
 ## License
