@@ -23,6 +23,7 @@ It is a single Go binary with no dependencies outside the standard library. The 
   - Hides `.git`, `node_modules`, gitignored paths and generated files (`// Code generated ... DO NOT EDIT.`). The project menu can show them again.
 - **Projects:**
   - Added from the project dropdown, or discovered automatically from globs such as `~/src/*`.
+  - The project dropdown shows them as a folder tree, so nested repos and workspaces stay grouped.
   - Indexed in the background and re-indexed periodically. gopls is told when files change on disk.
 
 - **Deep links**:
@@ -35,6 +36,11 @@ It is a single Go binary with no dependencies outside the standard library. The 
   - In side-by-side mode the two panes scroll together, and the divider can be dragged.
   - Relative links open the file in codebrowse; `file.go#L10-L20` highlights those lines and `other.md#section` jumps to that heading.
   - The last mode you picked is used for the next Markdown file you open.
+- **Changes against main**, as in IntelliJ:
+  - Thin bars next to the line numbers mark lines added (green) or changed (blue) on your branch, and a grey wedge marks deleted lines.
+  - Changed files are colored in the tree and tabs, and so are the folders that contain them.
+  - The arrows at the top right (or **F7** / **Shift+F7**) jump to the next or previous change across all files and reveal the file in the tree.
+  - The comparison is against where your branch left `main` (or `master`, `origin/main`, `origin/master`), including uncommitted edits; on `main` itself it shows uncommitted edits only. The "vs main" dropdown next to the arrows picks another branch, remembered per project.
 - **Zoom**: Ctrl+Scroll (or pinch) over the editor or the Markdown preview zooms just that pane, not the whole page. Ctrl+0 resets it.
 
 Other file types (YAML, JS/TS, SQL, proto, …) get basic syntax highlighting but no navigation.
@@ -52,6 +58,7 @@ http://host:7878/#p=<project>&f=<file>&l=<lines>
 | `p` | Project id: the slugified folder name, for example `my-repo`. Optional if `f` is absolute; the project is then inferred from the path. |
 | `f` | File path, absolute or relative to the project root. URL-encode it. |
 | `l` | Lines to highlight: `42`, `10-20`, or several ranges such as `10-20,31,40-45` (`L10-L20` also works). The view jumps to the first range. |
+| `c` | A line to place the caret on without highlighting it. The address bar uses this when nothing is highlighted. |
 
 ## Walkthroughs
 
@@ -115,6 +122,8 @@ make password   # prints the generated login password
 ```
 
 Then open http://127.0.0.1:7878 and add a project.
+
+Prebuilt binaries for Linux and macOS (amd64 and arm64) are on the [releases page](https://github.com/binwiederhier/codebrowse/releases). Put `codebrowse` on your PATH and run it directly; `make install` is only needed for the systemd service.
 
 To keep the service running after you log out of the machine, enable lingering: `loginctl enable-linger $USER`.
 
@@ -184,6 +193,7 @@ make restart                                                    # deploy to the 
 | `tour.go` | `codebrowse tour`: validates a walkthrough and prints its link. |
 | `web/` | The UI: `index.html`, `app.css`, `app.js`. |
 | `web/markdown.js` | The Markdown preview renderer and its HTML sanitizer. Tests are in `test/`. |
+| `web/projtree.js` | Groups the project list into the folder tree of the project menu. Tests are in `test/`. |
 | `web/vendor/` | Mermaid (MIT), vendored as a single file so diagrams render without internet access. |
 
 ## Instructions for Claude (AI coding agents)

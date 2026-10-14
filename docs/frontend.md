@@ -8,6 +8,7 @@ The UI is plain JavaScript with no build step, embedded into the binary from `we
 | `app.css` | IntelliJ "New UI" dark theme, editor rows, Markdown preview styles. |
 | `app.js` | Everything else: state, lexers, editor, navigation, walkthroughs, preview, zoom. |
 | `markdown.js` | The Markdown preview renderer and its HTML sanitizer (tested in `test/`). |
+| `projtree.js` | Groups projects into a folder tree for the project menu (tested in `test/`). |
 | `vendor/mermaid-*.min.js` | Mermaid, loaded on demand when a preview contains a diagram. |
 
 ## State
@@ -55,6 +56,10 @@ A line's HTML (`lineHTML`) is built from up to three layers, later ones winning:
 
 Rows have a fixed height (`LH`, from the `--lh` CSS variable), so scrolling, the sticky function header and line math are simple multiplications. Columns are measured from the DOM (`domPos`, `posFromPoint`), so they stay correct with any font.
 
+### Changes against the base branch
+
+`loadChanges` fetches `/api/changes` for the whole project, on project load, on every new index version (a commit or checkout changes the diff without touching any file) and shortly after an open file changes. The one list drives everything: `renderDiff` adds `chg-add`, `chg-mod` and `chg-del` classes to rows, drawn as bars and wedges in the line-number gutter; tree rows and tabs get `chg-A`/`chg-M`, and folders above a changed file `chg-M`. The top bar shows the base, the number of changed files, and arrows (F7 / Shift+F7) that step through every run of changed lines in path order (`goChange`), placing its first line a third from the top. The base picked from the dropdown is stored per project in `localStorage` (`base.<project>`).
+
 ## Navigation and deep links
 
 Every navigation is a browser history entry, so Back and Forward (Alt+Left/Right, the mouse back button) work everywhere:
@@ -81,7 +86,7 @@ sequenceDiagram
   A->>A: openFile(state.path), restore caret, marks, scroll
 ```
 
-The URL hash always mirrors the current position (`#p=<project>&f=<path>&l=<lines>`), and is updated with `replaceState` 400ms after the caret stops moving. Highlighted line ranges (`marks`) come from clicking line numbers or from the `l` parameter.
+The URL hash always mirrors the current position, and is updated with `replaceState` 400ms after the caret stops moving. Highlighted line ranges (`marks`) come from clicking line numbers or from the `l` parameter (`#p=<project>&f=<path>&l=<lines>`); without marks, the caret line goes in `c` instead, so a reload restores the position without highlighting it.
 
 ## Walkthroughs
 

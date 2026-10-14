@@ -66,6 +66,8 @@ func (s *server) routes(mux *http.ServeMux, static http.Handler) {
 	mux.HandleFunc("GET /api/find", s.handleFind)
 	mux.HandleFunc("GET /api/file", s.handleFile)
 	mux.HandleFunc("GET /api/raw", s.handleRaw)
+	mux.HandleFunc("GET /api/changes", s.handleChanges)
+	mux.HandleFunc("GET /api/branches", s.handleBranches)
 	mux.HandleFunc("GET /api/semantic", s.handleSemantic)
 	mux.HandleFunc("GET /api/hints", s.handleHints)
 	mux.HandleFunc("GET /api/symbols", s.handleSymbols)
@@ -479,6 +481,24 @@ func (s *server) handleFile(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleRaw serves an image file as-is, for <img> tags in rendered Markdown.
+func (s *server) handleChanges(w http.ResponseWriter, r *http.Request) {
+	p, err := s.project(r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, p.changes(r.FormValue("base")))
+}
+
+func (s *server) handleBranches(w http.ResponseWriter, r *http.Request) {
+	p, err := s.project(r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, p.branches())
+}
+
 func (s *server) handleRaw(w http.ResponseWriter, r *http.Request) {
 	if _, err := s.project(r); err != nil {
 		httpErr(w, http.StatusBadRequest, err)

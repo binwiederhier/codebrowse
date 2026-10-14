@@ -246,6 +246,7 @@ func (p *project) index() {
 		return nil
 	})
 	sort.Strings(files)
+
 	p.mu.Lock()
 	first := len(p.dirs) == 0
 	p.dirs, p.files, p.stats, p.gen, p.git = dirs, files, stats, gen, gits

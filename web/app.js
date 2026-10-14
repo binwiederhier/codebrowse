@@ -214,6 +214,10 @@ const S = {
   treeSel: null,        // rel path
   treeVersion: -1,
   status: {},
+  base: '',             // branch to compare with, '' for the default (main, master, ...)
+  changes: null,        // /api/changes result: { base, files: [{ path, rel, status, changes }] }
+  chgByPath: new Map(), // path -> changed file
+  chgDirs: new Set(),   // rel dirs that contain changed files
 };
 
 const proj = () => S.projects.find(p => p.id === S.pid);
@@ -239,6 +243,8 @@ async function switchProject(pid, { restore = true, skipActive = false } = {}) {
   document.querySelectorAll('#editorWrap .fview').forEach(el => el.remove());
   S.files.clear(); S.tabs = []; S.active = null; S.tree.clear(); S.treeSel = null; S.treeVersion = -1; S.status = {};
   S.pid = pid;
+  S.base = store.get('base.' + pid, '');
+  setChanges(null);
   const p = proj();
   S.expanded = new Set(store.get('expanded.' + pid, []));
   S.recent = store.get('recent.' + pid, []);
@@ -248,6 +254,7 @@ async function switchProject(pid, { restore = true, skipActive = false } = {}) {
   store.set('project', pid);
   await refreshTree(true);
   pollStatus();
+  loadChanges();
   if (restore) {
     const tabs = store.get('tabs.' + pid, []);
     const active = store.get('active.' + pid, null);
@@ -274,10 +281,31 @@ function renderProjectWidgets() {
 
 function openProjectMenu(anchor) {
   const p = proj();
-  const items = S.projects.map(pr => ({
-    html: `<span class="mcheck">${pr.id === S.pid ? '✓' : ''}</span><span class="pbadge" style="background:${projectColor(pr.name)}">${esc(projectInitials(pr.name))}</span><span>${esc(pr.name)}</span><span class="msub">${esc(pr.path)}</span>`,
-    action: () => { if (pr.id !== S.pid) switchProject(pr.id); },
-  }));
+  const collapsed = new Set(store.get('projCollapsed', []));
+  const toggle = key => {
+    if (collapsed.has(key)) collapsed.delete(key); else collapsed.add(key);
+    store.set('projCollapsed', [...collapsed]);
+    openProjectMenu(anchor);
+    return true;
+  };
+
+  // Projects as a folder tree; the chevron folds a folder (or a project holding other projects)
+  const items = [];
+  const walk = (nodes, depth) => {
+    for (const n of nodes) {
+      const open = !collapsed.has(n.key), pr = n.project;
+      const tw = `<span class="tw${open ? ' open' : ''}">${n.children.length ? ICON.chev : ''}</span>`;
+      const indent = `<span class="mindent" style="width:${depth * 16}px"></span>`;
+      if (pr) items.push({
+        html: `<span class="mcheck">${pr.id === S.pid ? '✓' : ''}</span>${indent}${tw}<span class="pbadge" style="background:${projectColor(pr.name)}">${esc(projectInitials(pr.name))}</span><span>${esc(pr.name)}</span>`,
+        title: pr.path,
+        action: e => { if (e.target.closest('.tw') && n.children.length) return toggle(n.key); if (pr.id !== S.pid) switchProject(pr.id); },
+      });
+      else items.push({ html: `<span class="mcheck"></span>${indent}${tw}${ICON.folder}<span class="mfolder">${esc(n.name)}</span>`, title: n.key, action: () => toggle(n.key) });
+      if (open) walk(n.children, depth + 1);
+    }
+  };
+  walk(projectTree(S.projects), 0);
   if (items.length) items.push('sep');
   items.push({ html: '<span class="mcheck">+</span><span>Add Project…</span>', action: addProjectDialog });
   if (p) {
@@ -305,7 +333,9 @@ function showMenu(anchor, items) {
     if (it === 'sep') { m.insertAdjacentHTML('beforeend', '<div class="msep"></div>'); continue; }
     const d = document.createElement('div');
     d.className = 'mi'; d.innerHTML = it.html;
-    d.addEventListener('click', () => { hideMenu(); it.action(); });
+    if (it.title) d.title = it.title;
+    // An action returning true keeps the menu open (it re-rendered it, so the click target is gone)
+    d.addEventListener('click', e => { if (it.action(e) === true) e.stopPropagation(); else hideMenu(); });
     m.appendChild(d);
   }
   const r = anchor.getBoundingClientRect();
@@ -399,10 +429,13 @@ function renderTree() {
       if (e.dir) {
         const open = S.expanded.has(rel) && S.tree.has(rel);
         if (open) cls.push('open');
+        if (S.chgDirs.has(rel)) cls.push('chg-M');
         out.push(`<div class="${cls.join(' ')}" data-p="${esc(rel)}" data-d="1" style="padding-left:${pad}px" title="${e.reason ? esc(e.reason) : ''}"><span class="tw">${ICON.chev}</span>${e.ignored ? ICON.folderIgn : ICON.folder}<span class="tn">${esc(e.name)}</span>${gitBadge(e.branch, e.dirty)}</div>`);
         if (open) walk(rel, depth + 1);
       } else {
         if (e.name.endsWith('_test.go')) cls.push('test');
+        const c = S.chgByPath.get(p.path + '/' + rel);
+        if (c) cls.push('chg-' + c.status);
         out.push(`<div class="${cls.join(' ')}" data-p="${esc(rel)}" style="padding-left:${pad}px" title="${e.reason ? esc(e.reason) : ''}"><span class="tw"></span>${fileIcon(e.name)}<span class="tn">${esc(e.name)}</span></div>`);
       }
     }
@@ -442,7 +475,7 @@ function selectTreeRow(rel, scroll) {
   if (scroll) { const r = treeRows().find(r => r.dataset.p === rel); reveal(r, $('#tree'), scroll === 'center'); }
 }
 
-async function locateInTree() {
+async function locateInTree({ focus = true } = {}) {
   const f = S.files.get(S.active);
   if (!f) return;
   const rel = relInProject(f.path);
@@ -456,7 +489,7 @@ async function locateInTree() {
   }
   renderTree();
   selectTreeRow(rel, 'center');
-  $('#tree').focus();
+  if (focus) $('#tree').focus();
   saveSession();
 }
 
@@ -609,7 +642,109 @@ function renderRows(f) {
   f.rowEls = f.rowsEl.children;
   f.curRow = null;
   renderMarks(f);
+  renderDiff(f);
   if (f.el && f.el.isConnected) { placeCaret(f, false); updateSticky(f); renderHighlights(f); }
+}
+
+// ---- changes against the base branch (main): gutter bars, tree and tab colors, next/previous change
+
+const DIFF_TITLES = { add: 'Added', mod: 'Changed', del: 'Deleted lines below' };
+let changesSeq = 0, changesTimer;
+
+async function loadChanges() {
+  if (!S.pid) return;
+  const pid = S.pid, seq = ++changesSeq;
+  let res;
+  try { res = await api('changes', { project: pid, base: S.base }); } catch { return; }
+  if (pid === S.pid && seq === changesSeq) setChanges(res);
+}
+function scheduleChanges() { clearTimeout(changesTimer); changesTimer = setTimeout(loadChanges, 300); }
+
+function setChanges(res) {
+  S.changes = res;
+  S.chgByPath = new Map();
+  S.chgDirs = new Set();
+  for (const c of res ? res.files : []) {
+    S.chgByPath.set(c.path, c);
+    for (let d = c.rel.lastIndexOf('/'); d > 0; d = c.rel.lastIndexOf('/', d - 1)) S.chgDirs.add(c.rel.slice(0, d));
+  }
+  for (const f of S.files.values()) if (f) renderDiff(f);
+  renderTree(); renderTabs(); renderChangesWidget();
+}
+
+// changeStops lists every change in the project in path and line order, one per run of lines.
+function changeStops() {
+  const stops = [];
+  for (const c of S.changes ? S.changes.files : []) {
+    if (!c.changes.length) { stops.push({ path: c.path, rel: c.rel, line: 0 }); continue; }
+    for (const ch of c.changes) stops.push({ path: c.path, rel: c.rel, line: Math.max(0, ch.start) });
+  }
+  return stops;
+}
+
+async function goChange(dir) {
+  const stops = changeStops();
+  if (!stops.length) { toast(S.changes ? `No changes against ${S.changes.base}` : 'No changes'); return; }
+  const f = S.files.get(S.active);
+  const rel = (S.active && relInProject(S.active)) || '', line = f ? f.caret.line : -1;
+  const cmp = st => st.rel < rel ? -1 : st.rel > rel ? 1 : st.line - line;
+  let st = dir > 0 ? stops.find(x => cmp(x) > 0) : [...stops].reverse().find(x => cmp(x) < 0);
+  if (!st) { st = dir > 0 ? stops[0] : stops[stops.length - 1]; toast(dir > 0 ? 'Wrapped to the first change' : 'Wrapped to the last change', 1500); }
+  const nf = await openFile(st.path, { line: st.line, col: 0 }).catch(() => null);
+  if (!nf) return;
+  // The start of the change lands about a third from the top, so what follows it is visible
+  if (nf.mdEl && nf.mdMode === 'preview') setMdMode(nf, 'split', false);
+  nf.el.scrollTop = st.line * LH - nf.el.clientHeight / 3;
+  recordHistory(true);
+  locateInTree({ focus: false }); // expand the tree down to the file, select and reveal it
+}
+
+function renderChangesWidget() {
+  const w = $('#tbChanges');
+  if (!w) return;
+  const c = S.changes;
+  w.classList.toggle('hidden', !c || !c.base);
+  if (!c || !c.base) return;
+  const n = c.files.length;
+  $('#tbBaseName').textContent = c.base;
+  $('#chgCount').textContent = n ? `${n.toLocaleString()} file${n === 1 ? '' : 's'} changed` : 'No changes';
+  $('#chgPrev').disabled = $('#chgNext').disabled = !n;
+}
+
+async function openBaseMenu(anchor) {
+  let branches = [];
+  try { branches = await api('branches', { project: S.pid }); } catch { /* the default still works */ }
+  const pick = b => { S.base = b; store.set('base.' + S.pid, b); loadChanges(); };
+  const item = (label, b, sub) => ({ html: `<span class="mcheck">${S.base === b ? '✓' : ''}</span><span>${esc(label)}</span>${sub ? `<span class="msub">${esc(sub)}</span>` : ''}`, action: () => pick(b) });
+  const items = [item('Default', '', 'main, master, origin/main or origin/master')];
+  if (branches.length) items.push('sep');
+  for (const b of branches) items.push(item(b, b));
+  if (S.base && !branches.includes(S.base)) items.push(item(S.base, S.base, 'not found, using the default'));
+  showMenu(anchor, items);
+}
+
+function renderDiff(f) {
+  if (!f.rowEls) return;
+  f.rowsEl.querySelectorAll('.chg').forEach(r => { r.classList.remove('chg', 'chg-add', 'chg-mod', 'chg-del', 'chg-del-top'); r.firstChild.title = ''; });
+  const d = S.chgByPath.get(f.path);
+  if (!d) return;
+  const n = f.rowEls.length, since = ` since ${S.changes.base}`;
+  for (const c of d.changes) {
+    if (c.kind === 'del') {
+      const row = f.rowEls[Math.min(Math.max(c.start, 0), n - 1)];
+      if (!row || row.classList.contains('chg')) continue; // an add/mod bar on the same line wins
+      row.classList.add('chg', 'chg-del');
+      if (c.start < 0) row.classList.add('chg-del-top');
+      row.firstChild.title = (c.start < 0 ? 'Deleted lines above' : DIFF_TITLES.del) + since;
+      continue;
+    }
+    for (let i = c.start; i <= c.end && i < n; i++) {
+      const row = f.rowEls[i];
+      row.classList.remove('chg-del', 'chg-del-top');
+      row.classList.add('chg', 'chg-' + c.kind);
+      row.firstChild.title = DIFF_TITLES[c.kind] + since;
+    }
+  }
 }
 
 const loading = new Map(); // path -> in-flight load, so concurrent opens share one editor
@@ -664,6 +799,7 @@ async function reloadIfChanged(f) {
     renderRows(f);
     if (f.mdEl) renderMarkdownPreview(f);
     if (f.lang === 'go') loadSemantic(f);
+    scheduleChanges();
   } catch { /* ignore */ } finally { f.checking = false; }
 }
 
@@ -729,7 +865,8 @@ function closeTab(path, quiet) {
 
 function renderTabs() {
   const el = $('#tabs');
-  el.innerHTML = S.tabs.map(p => `<div class="tab ${p === S.active ? 'active' : ''}" data-p="${esc(p)}" title="${esc(p)}">${fileIcon(basename(p))}<span>${esc(basename(p))}</span><span class="tx-close"><svg viewBox="0 0 16 16" width="11" height="11"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></span></div>`).join('');
+  const chg = p => { const c = S.chgByPath.get(p); return c ? ` class="chg-${c.status}"` : ''; };
+  el.innerHTML = S.tabs.map(p => `<div class="tab ${p === S.active ? 'active' : ''}" data-p="${esc(p)}" title="${esc(p)}">${fileIcon(basename(p))}<span${chg(p)}>${esc(basename(p))}</span><span class="tx-close"><svg viewBox="0 0 16 16" width="11" height="11"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></span></div>`).join('');
   const act = $('.tab.active', el);
   if (act) { const er = act.getBoundingClientRect(), cr = el.getBoundingClientRect(); if (er.left < cr.left) el.scrollLeft -= cr.left - er.left; else if (er.right > cr.right) el.scrollLeft += er.right - cr.right; }
 }
@@ -1070,13 +1207,15 @@ function currentState() {
   return { pid: S.pid, path: f.path, line: f.caret.line, col: f.caret.col, top: f.el.scrollTop, ptop: f.mdEl ? f.mdEl.scrollTop : null, marks: f.marks || null, tour: S.tour ? S.tour.raw : null, step: S.tour ? S.tour.step : null };
 }
 function stateHash(st) {
-  const l = st.marks && st.marks.length ? formatRanges(st.marks) : String(st.line + 1);
-  const q = { p: st.pid, f: st.path, l };
+  // l= marks lines; a plain caret goes in c= so a reload restores it without highlighting it
+  const q = { p: st.pid, f: st.path };
+  if (st.marks && st.marks.length) q.l = formatRanges(st.marks); else q.c = String(st.line + 1);
   if (st.tour) { q.tour = st.tour; q.step = st.step + 1; }
   return '#' + new URLSearchParams(q).toString();
 }
 
-// ---- deep links: #p=<project>&f=<path>&l=<lines>, lines like "42", "10-20" or "10-20,31,40-45"
+// ---- deep links: #p=<project>&f=<path>&l=<lines>, lines like "42", "10-20" or "10-20,31,40-45";
+// c=<line> instead of l= places the caret without marking the line
 
 function parseRanges(spec) {
   const out = [];
@@ -1102,7 +1241,8 @@ function resolveLink(hp) {
   }
   const pr = S.projects.find(p => p.id === pid);
   if (pr && !path.startsWith('/')) path = pr.path + '/' + path.replace(/^\.?\//, '');
-  return { pid, path, ranges: parseRanges(hp.get('l')), tour, step };
+  const caret = Math.max(0, (+hp.get('c') || 1) - 1);
+  return { pid, path, ranges: parseRanges(hp.get('l')), caret, tour, step };
 }
 
 async function openDeepLink(link) {
@@ -1114,7 +1254,7 @@ async function openDeepLink(link) {
   }
   if (link.pid !== S.pid) await switchProject(link.pid, { restore: false });
   const first = link.ranges[0];
-  const f = await openFile(link.path, { line: first ? first[0] : 0, col: 0, push: false, center: true }).catch(() => null);
+  const f = await openFile(link.path, { line: first ? first[0] : link.caret, col: 0, push: false, center: true }).catch(() => null);
   if (!f) return;
   setMarks(f, link.ranges.length && (link.ranges.length > 1 || link.ranges[0][0] !== link.ranges[0][1]) ? link.ranges : (first ? [first] : null));
   if (first) revealRange(f, first[0], first[1]);
@@ -2037,7 +2177,7 @@ function openHelp() {
     ['Ctrl+E', 'Recent files'], ['Ctrl+F12', 'File structure'], ['Alt+F1', 'Select opened file in project tree'], ['Click / Shift+Click line number', 'Highlight a line / range (Ctrl+Click adds a range); the URL becomes a deep link'],
     ['Alt+Shift+C', 'Copy deep link to the highlighted lines, selection or caret line'], ['F8 / Shift+F8', 'Next / previous walkthrough step'],
     ['Alt+1', 'Focus project tree'], ['Esc', 'Close popup / usages pane, back to editor'], ['Ctrl+F', 'Find in file (browser find)'],
-    ['Hover', 'Quick documentation'], ['Ctrl+Scroll', 'Zoom the editor font or the Markdown preview (Ctrl+0 resets)'], ['Middle-click tab', 'Close tab'],
+    ['Hover', 'Quick documentation'], ['Ctrl+Scroll', 'Zoom the editor font or the Markdown preview (Ctrl+0 resets)'], ['F7 / Shift+F7', 'Next / previous change against the base branch (also Ctrl+Alt+Shift+↓ / ↑)'], ['Middle-click tab', 'Close tab'],
   ];
   m.innerHTML = `<div class="help"><h2>Keyboard shortcuts</h2>${rows.map(r => `<kbd>${esc(r[0])}</kbd><span>${esc(r[1])}</span>`).join('')}</div>`;
   document.body.appendChild(m);
@@ -2058,7 +2198,12 @@ async function pollStatus() {
   const prev = S.status;
   S.status = st;
   if (prev.branch !== st.branch || prev.dirty !== st.dirty) renderTree();
-  if (st.version !== S.treeVersion) { const first = S.treeVersion === -1; S.treeVersion = st.version; if (!first || st.index === 'ready') refreshTree(false); }
+  if (st.version !== S.treeVersion) {
+    const first = S.treeVersion === -1;
+    S.treeVersion = st.version;
+    if (!first || st.index === 'ready') refreshTree(false);
+    loadChanges(); // a commit or checkout changes the diff without touching any file
+  }
   if (prev.gopls && prev.gopls !== 'ready' && st.gopls === 'ready') {
     for (const f of S.files.values()) if (f && f.lang === 'go' && (f.semFailed || !f.sem)) { f.semFailed = false; loadSemantic(f); }
   }
@@ -2121,6 +2266,7 @@ function initKeys() {
     else if (mod && e.key === 'F12') { e.preventDefault(); openFinder('structure'); }
     else if (e.key === 'F8' && !mod && !e.altKey && S.tour) { e.preventDefault(); goStep(S.tour.step + (e.shiftKey ? -1 : 1)); }
     else if (e.altKey && e.shiftKey && !mod && k === 'c') { e.preventDefault(); copyLink(); }
+    else if ((e.key === 'F7' && !mod && !e.altKey) || (mod && e.altKey && e.shiftKey && (e.key === 'ArrowDown' || e.key === 'ArrowUp'))) { e.preventDefault(); goChange(e.key === 'ArrowUp' || (e.key === 'F7' && e.shiftKey) ? -1 : 1); }
     else if (e.altKey && !mod && e.key === 'F1') { e.preventDefault(); locateInTree(); }
     else if (mod && !e.altKey && !e.shiftKey && e.key === '0' && f && $('#editorWrap').contains(document.activeElement)) { e.preventDefault(); resetZoom(f); }
     else if (e.altKey && !mod && e.key === '1') { e.preventDefault(); $('#tree').focus(); }
@@ -2139,7 +2285,7 @@ function initKeys() {
   window.addEventListener('blur', () => { ctrlDown = false; setLink(null); });
   window.addEventListener('focus', () => { const f = S.files.get(S.active); if (f) reloadIfChanged(f); pollStatus(); });
   document.addEventListener('mousedown', e => {
-    if (!e.target.closest('#menu') && !e.target.closest('#projBtn') && !e.target.closest('#tbProject')) hideMenu();
+    if (!e.target.closest('#menu') && !e.target.closest('#projBtn') && !e.target.closest('#tbProject') && !e.target.closest('#tbBase')) hideMenu();
     if (!e.target.closest('#popup')) hidePopup();
   });
   $('#popup').addEventListener('mouseenter', () => clearTimeout(popupHideTimer));
@@ -2173,6 +2319,9 @@ async function boot() {
   initTree(); initTabs(); initBottom(); initKeys(); initSplitters();
   $('#projBtn').addEventListener('click', e => openProjectMenu(e.currentTarget));
   $('#tbProject').addEventListener('click', e => openProjectMenu(e.currentTarget));
+  $('#tbBase').addEventListener('click', e => openBaseMenu(e.currentTarget));
+  $('#chgPrev').addEventListener('click', () => goChange(-1));
+  $('#chgNext').addEventListener('click', () => goChange(1));
   $('#tbSearch').addEventListener('click', () => openFinder('files'));
   $('#tbHelp').addEventListener('click', openHelp);
   $('#sbLink').addEventListener('click', copyLink);
