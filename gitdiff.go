@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"fmt"
+	"hash/fnv"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,6 +17,7 @@ const (
 	maxDiffSize      = 8 << 20 // larger diffs list the changed files, without line runs
 	maxUntrackedRead = 1 << 20 // larger untracked files are not read to count their lines
 	maxBranches      = 200
+	maxOldLines      = 200 // removed lines sent per change, for showing the old code
 )
 
 var (
@@ -26,9 +29,13 @@ var (
 // lineChange is a run of changed lines in the working file, 0-based and inclusive. For "del",
 // Start is the line the deleted lines were below (-1 for the top of the file).
 type lineChange struct {
-	Kind  string `json:"kind"` // "add", "mod" or "del"
-	Start int    `json:"start"`
-	End   int    `json:"end"`
+	Kind     string   `json:"kind"` // "add", "mod" or "del"
+	Start    int      `json:"start"`
+	End      int      `json:"end"`
+	ID       string   `json:"id"`                 // follows the change's content, so a review mark survives edits elsewhere
+	Old      []string `json:"old,omitempty"`      // the removed lines, for "mod" and "del"
+	OldStart int      `json:"oldStart,omitempty"` // 0-based line of Old in the base
+	OldMore  int      `json:"oldMore,omitempty"`  // removed lines left out of Old
 }
 
 // fileDiff is how one file differs from the base.
@@ -147,8 +154,8 @@ func gitRepoChanges(dir, base string) *repoChanges {
 			}
 			rel := filepath.FromSlash(f)
 			d := &fileDiff{Status: "A", Changes: []lineChange{}}
-			if n := countLines(filepath.Join(dir, rel)); n > 0 {
-				d.Changes = append(d.Changes, lineChange{Kind: "add", Start: 0, End: n - 1})
+			if n, id := untrackedLines(filepath.Join(dir, rel)); n > 0 {
+				d.Changes = append(d.Changes, lineChange{Kind: "add", Start: 0, End: n - 1, ID: id})
 			}
 			rc.Files[rel] = d
 		}
@@ -221,10 +228,35 @@ func parsePatch(patch string) map[string][]lineChange {
 	return res
 }
 
-// parseHunks turns the hunk headers of a -U0 diff into changed line runs.
+// parseHunks turns the hunk headers of a -U0 diff into changed line runs, with the lines they removed.
+// Each run's ID hashes the hunk's removed and added lines, numbered when the same hunk occurs more
+// than once in the file.
 func parseHunks(diff string) []lineChange {
 	changes := []lineChange{}
-	for _, m := range hunkRe.FindAllStringSubmatch(diff, -1) {
+	seen := map[string]int{}
+	locs := hunkRe.FindAllStringSubmatchIndex(diff, -1)
+	for k, loc := range locs {
+		m := hunkRe.FindStringSubmatch(diff[loc[0]:loc[1]])
+		body := diff[loc[1]:]
+		if k+1 < len(locs) {
+			body = diff[loc[1]:locs[k+1][0]]
+		}
+		if i := strings.IndexByte(body, '\n'); i >= 0 {
+			body = body[i+1:] // the rest of the header line names the enclosing function, which may change
+		} else {
+			body = ""
+		}
+		var removed []string
+		for _, l := range strings.Split(body, "\n") {
+			if strings.HasPrefix(l, "-") {
+				removed = append(removed, l[1:])
+			}
+		}
+		id := contentID(body)
+		seen[id]++
+		if n := seen[id]; n > 1 {
+			id += "-" + strconv.Itoa(n)
+		}
 		count := func(s string) int {
 			if s == "" {
 				return 1
@@ -233,36 +265,53 @@ func parseHunks(diff string) []lineChange {
 			return n
 		}
 		oldCount := count(m[2])
+		oldStart, _ := strconv.Atoi(m[1])
 		start, _ := strconv.Atoi(m[3])
 		newCount := count(m[4])
+		c := lineChange{Kind: "mod", Start: start - 1, End: start + newCount - 2, ID: id}
 		switch {
 		case newCount == 0:
-			changes = append(changes, lineChange{Kind: "del", Start: start - 1, End: start - 1})
+			c = lineChange{Kind: "del", Start: start - 1, End: start - 1, ID: id}
 		case oldCount == 0:
-			changes = append(changes, lineChange{Kind: "add", Start: start - 1, End: start + newCount - 2})
-		default:
-			changes = append(changes, lineChange{Kind: "mod", Start: start - 1, End: start + newCount - 2})
+			c.Kind = "add"
 		}
+		if len(removed) > 0 {
+			c.OldStart = oldStart - 1
+			if len(removed) > maxOldLines {
+				c.OldMore = len(removed) - maxOldLines
+				removed = removed[:maxOldLines]
+			}
+			c.Old = removed
+		}
+		changes = append(changes, c)
 	}
 	return changes
 }
 
-// countLines counts the lines of a file, or returns 1 for one too large to read.
-func countLines(path string) int {
+// untrackedLines counts the lines of a file and hashes its content. A file too large to read is
+// one line, with an ID from its size and modification time.
+func untrackedLines(path string) (int, string) {
 	fi, err := os.Stat(path)
 	if err != nil || fi.Size() == 0 {
-		return 0
+		return 0, ""
 	}
 	if fi.Size() > maxUntrackedRead {
-		return 1
+		return 1, contentID(fmt.Sprint(fi.Size(), fi.ModTime().UnixNano()))
 	}
 	content, err := os.ReadFile(path)
-	if err != nil {
-		return 0
+	if err != nil || len(content) == 0 {
+		return 0, ""
 	}
 	n := bytes.Count(content, []byte("\n"))
 	if content[len(content)-1] != '\n' {
 		n++
 	}
-	return n
+	return n, contentID(string(content))
+}
+
+// contentID is a short hash identifying a change by its content.
+func contentID(s string) string {
+	h := fnv.New64a()
+	h.Write([]byte(s))
+	return strconv.FormatUint(h.Sum64(), 36)
 }

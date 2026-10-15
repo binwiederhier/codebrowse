@@ -38,7 +38,8 @@ kbd { font: 12px var(--ui-font); color: var(--text-dim); }
 .hidden { display: none !important; }
 .spacer { flex: 1; }
 
-#app { overflow: hidden; display: grid; grid-template-rows: 40px 1fr 24px; height: 100vh; }
+/* minmax(0, 1fr): without it, the column grows to fit all tabs and pushes the top bar off screen */
+#app { overflow: hidden; display: grid; grid-template-rows: 40px 1fr 24px; grid-template-columns: minmax(0, 1fr); height: 100vh; }
 
 /* ---------- top bar ---------- */
 #topbar { background: var(--panel); border-bottom: 1px solid var(--bg); display: flex; align-items: center; justify-content: space-between; padding: 0 8px; gap: 8px; min-width: 0; }
@@ -56,6 +57,16 @@ kbd { font: 12px var(--ui-font); color: var(--text-dim); }
 .tb-changes .tb-status { margin: 0 0 0 4px; }
 .tb-changes .tb-dim { color: var(--text-dim); font-weight: 400; }
 .tb-icon:disabled { opacity: .35; pointer-events: none; }
+.chg-pos { min-width: 44px; text-align: center; font-size: 12px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.chg-pos:empty { display: none; }
+.chg-file { display: flex; align-items: center; gap: 2px; margin-left: 6px; padding-left: 6px; border-left: 1px solid var(--border); }
+.chg-filter.on { color: var(--chg-mod-text); }
+.chg-mark .tick { opacity: 0; }
+.chg-mark.on { color: var(--chg-add-text); }
+.chg-mark.on .tick { opacity: 1; }
+.tb-changes .chg-reviewed { margin-left: -2px; } /* cancels the flex gap before the comma */
+.chg-reviewed:empty { display: none; }
+.chg-reviewed.all { color: var(--chg-add-text); }
 
 /* ---------- main layout ---------- */
 #main { display: flex; min-height: 0; }
@@ -137,6 +148,9 @@ kbd { font: 12px var(--ui-font); color: var(--text-dim); }
 .row.chg-del-top .no::after { bottom: auto; top: 0; }
 .trow.chg-A .tn, .tab .chg-A { color: var(--chg-add-text); }
 .trow.chg-M .tn, .tab .chg-M { color: var(--chg-mod-text); }
+/* Reviewed changes keep a faint bar; fully reviewed files get a check, as GitHub's "Viewed" */
+.row.chg-ok .no::after { opacity: .35; }
+.trow.chg-done .tn::after, .tab .chg-done::after { content: " \2713"; color: var(--chg-add-text); }
 .row.flash .tx { animation: flash 1.2s ease-out; }
 @keyframes flash { 0% { background: rgba(53,116,240,.35); } 100% { background: transparent; } }
 .caret { position: absolute; width: 2px; height: var(--lh); background: #CED0D6; z-index: 3; pointer-events: none; animation: blink 1.1s steps(1) infinite; }
@@ -294,6 +308,11 @@ kbd { font: 12px var(--ui-font); color: var(--text-dim); }
 .popup p { margin: 6px 0; }
 .popup code { font: 12.5px var(--code-font); color: var(--code); }
 .popup a { color: #548AF7; }
+.popup .old-head { padding: 6px 12px; font-size: 12px; color: var(--text-dim); border-bottom: 1px solid var(--border); }
+.popup .old-code { font: 12.5px/1.6 var(--code-font); color: var(--code); padding: 4px 0; background: #2B2224; tab-size: 4; font-variant-ligatures: none; }
+.popup .orow { display: flex; white-space: pre; min-height: 1.6em; padding-right: 14px; }
+.popup .ono { flex: none; min-width: 4ch; padding: 0 12px 0 8px; text-align: right; color: #6B5A5E; user-select: none; }
+.popup .old-more { padding: 2px 12px; color: var(--text-dim); font-family: var(--ui-font); font-size: 12px; }
 .toast { position: fixed; z-index: 60; left: 50%; bottom: 40px; transform: translateX(-50%); background: #3D3F43; border: 1px solid #4E5157; color: var(--text); padding: 8px 14px; border-radius: 6px; box-shadow: 0 6px 20px rgba(0,0,0,.5); }
 
 /* modal (finder, add project, help) */

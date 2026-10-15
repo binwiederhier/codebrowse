@@ -9,6 +9,7 @@ The UI is plain JavaScript with no build step, embedded into the binary from `we
 | `app.js` | Everything else: state, lexers, editor, navigation, walkthroughs, preview, zoom. |
 | `markdown.js` | The Markdown preview renderer and its HTML sanitizer (tested in `test/`). |
 | `projtree.js` | Groups projects into a folder tree for the project menu (tested in `test/`). |
+| `review.js` | Change stops, stepping between them and review marks (tested in `test/`). |
 | `vendor/mermaid-*.min.js` | Mermaid, loaded on demand when a preview contains a diagram. |
 
 ## State
@@ -58,7 +59,11 @@ Rows have a fixed height (`LH`, from the `--lh` CSS variable), so scrolling, the
 
 ### Changes against the base branch
 
-`loadChanges` fetches `/api/changes` for the whole project, on project load, on every new index version (a commit or checkout changes the diff without touching any file) and shortly after an open file changes. The one list drives everything: `renderDiff` adds `chg-add`, `chg-mod` and `chg-del` classes to rows, drawn as bars and wedges in the line-number gutter; tree rows and tabs get `chg-A`/`chg-M`, and folders above a changed file `chg-M`. The top bar shows the base, the number of changed files, and arrows (F7 / Shift+F7) that step through every run of changed lines in path order (`goChange`), placing its first line a third from the top. The base picked from the dropdown is stored per project in `localStorage` (`base.<project>`).
+`loadChanges` fetches `/api/changes` for the whole project, on project load, on every new index version (a commit or checkout changes the diff without touching any file) and shortly after an open file changes. The one list drives everything: `renderDiff` adds `chg-add`, `chg-mod` and `chg-del` classes to rows, drawn as bars and wedges in the line-number gutter; tree rows and tabs get `chg-A`/`chg-M`, and folders above a changed file `chg-M`. The top bar shows the base, the number of changed files, left/right arrows (Alt+Down/Up, F7 / Shift+F7) that step through every run of changed lines in path order (`goChange`), and up/down arrows (Ctrl+Alt+Shift+Down/Up) that cycle through the open file's (`goFileChange`). Both place the change's first line a third from the top, and `updateChangePos` shows `n/m` between each pair of arrows. The base picked from the dropdown is stored per project in `localStorage` (`base.<project>`).
+
+Old code: each changed or deleted run carries the base's removed lines (`old`, `oldStart`, capped at `maxOldLines` with `oldMore`). `showOldCode` renders them in `#popup`, lexed like the file, on hovering or clicking the gutter marker (`changeBarAt`: the right edge of a `.row.chg .no` cell) or on D (`toggleOldCode`); `changeAtLine` in `review.js` maps a row to its change.
+
+Review marks: each change has a server-side `id` hashing its removed and added lines (`parseHunks`; untracked files hash their content), so a mark survives edits elsewhere in the file and drops when the change itself is edited. A stop's key is `rel + "\n" + id` (`changeStops` in `review.js`). X / Shift+X (`toggleReviewed`, `toggleFileReviewed`) store keys in `localStorage` and, when marking, jump to the next unreviewed change (`goNextUnreviewed`) (`reviewed.<project>`, capped at `MAX_REVIEWED`); `renderReview` then redraws faded bars (`chg-ok`), `chg-done` files and folders with pending changes (`S.chgPending`). `S.chgFilter` (U, or the filter menu) makes `navStops` skip reviewed changes for the arrows and counters.
 
 ## Navigation and deep links
 

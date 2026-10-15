@@ -66,19 +66,100 @@ func TestParseHunks(t *testing.T) {
 		{Kind: "del", Start: 9, End: 9},
 		{Kind: "mod", Start: 20, End: 23},
 	}
-	if got := parseHunks(diff); !reflect.DeepEqual(got, want) {
+	if got := noIDs(parseHunks(diff)); !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %+v\nwant %+v", got, want)
 	}
 }
 
 func TestParseHunks_DeletedAtTop(t *testing.T) {
 	// A deletion is reported on the line above it; above the first line, that is -1
-	if got := parseHunks("@@ -1,2 +0,0 @@\n-a\n-b\n"); !reflect.DeepEqual(got, []lineChange{{Kind: "del", Start: -1, End: -1}}) {
+	if got := noIDs(parseHunks("@@ -1,2 +0,0 @@\n-a\n-b\n")); !reflect.DeepEqual(got, []lineChange{{Kind: "del", Start: -1, End: -1}}) {
 		t.Fatalf("got %+v", got)
 	}
 }
 
 // fileChanges returns the changes of one file from gitRepoChanges, or nil.
+// noIDs drops the review IDs and old lines, for comparing line runs only.
+func noIDs(changes []lineChange) []lineChange {
+	res := make([]lineChange, len(changes))
+	for i, c := range changes {
+		res[i] = lineChange{Kind: c.Kind, Start: c.Start, End: c.End}
+	}
+	return res
+}
+
+// runsString formats line runs without their IDs, as "[{kind start end} ...]".
+func runsString(changes []lineChange) string {
+	runs := []string{}
+	for _, c := range changes {
+		runs = append(runs, fmt.Sprintf("{%s %d %d}", c.Kind, c.Start, c.End))
+	}
+	return "[" + strings.Join(runs, " ") + "]"
+}
+
+func TestParseHunks_IDs(t *testing.T) {
+	// The ID follows the hunk's content, not its position or the function named in the header
+	moved := parseHunks("@@ -5 +7 @@ func a()\n-x\n+y\n")[0].ID
+	if moved == "" || moved != parseHunks("@@ -50 +90 @@ func b()\n-x\n+y\n")[0].ID {
+		t.Fatalf("a moved hunk changed its ID: %q", moved)
+	}
+	if moved == parseHunks("@@ -5 +7 @@\n-x\n+z\n")[0].ID {
+		t.Fatal("an edited hunk kept its ID")
+	}
+	// Identical hunks in one file still get distinct IDs
+	twice := parseHunks("@@ -5 +5 @@\n-x\n+y\n@@ -9 +9 @@\n-x\n+y\n")
+	if len(twice) != 2 || twice[0].ID == twice[1].ID {
+		t.Fatalf("got %+v", twice)
+	}
+}
+
+func TestParseHunks_OldLines(t *testing.T) {
+	diff := "@@ -0,0 +1 @@\n+new\n" +
+		"@@ -5,2 +7 @@ func a()\n-old1\n-old2\n+y\n" +
+		"@@ -9 +9,0 @@\n-gone\n\\ No newline at end of file\n"
+	got := parseHunks(diff)
+	if len(got) != 3 || got[0].Old != nil || got[0].OldStart != 0 ||
+		!reflect.DeepEqual(got[1].Old, []string{"old1", "old2"}) || got[1].OldStart != 4 ||
+		!reflect.DeepEqual(got[2].Old, []string{"gone"}) || got[2].OldStart != 8 {
+		t.Fatalf("got %+v", got)
+	}
+}
+
+func TestParseHunks_OldLinesCapped(t *testing.T) {
+	diff := "@@ -1," + fmt.Sprint(maxOldLines+5) + " +1 @@\n" + strings.Repeat("-x\n", maxOldLines+5) + "+y\n"
+	got := parseHunks(diff)
+	if len(got[0].Old) != maxOldLines || got[0].OldMore != 5 {
+		t.Fatalf("old %d, more %d", len(got[0].Old), got[0].OldMore)
+	}
+}
+
+func TestGitRepoChanges_IDsSurviveUnrelatedEdits(t *testing.T) {
+	lines := make([]string, 100)
+	for i := range lines {
+		lines[i] = fmt.Sprint(i)
+	}
+	dir := newRepo(t, map[string]string{"a.go": strings.Join(lines, "\n") + "\n"})
+	lines[50] = "FIFTY"
+	writeFile(t, filepath.Join(dir, "a.go"), strings.Join(lines, "\n")+"\n")
+	_, before := fileChanges(t, dir, "", "a.go")
+
+	// A new line at the top moves the change down, but it is still the same change
+	writeFile(t, filepath.Join(dir, "a.go"), "top\n"+strings.Join(lines, "\n")+"\n")
+	_, after := fileChanges(t, dir, "", "a.go")
+	if len(before.Changes) != 1 || len(after.Changes) != 2 || after.Changes[1].Start != 51 || after.Changes[1].ID != before.Changes[0].ID {
+		t.Fatalf("before %+v\nafter %+v", before.Changes, after.Changes)
+	}
+
+	// Untracked files get an ID that follows their content
+	writeFile(t, filepath.Join(dir, "new.go"), "1\n")
+	_, n1 := fileChanges(t, dir, "", "new.go")
+	writeFile(t, filepath.Join(dir, "new.go"), "2\n")
+	_, n2 := fileChanges(t, dir, "", "new.go")
+	if n1.Changes[0].ID == "" || n1.Changes[0].ID == n2.Changes[0].ID {
+		t.Fatalf("untracked IDs %q, %q", n1.Changes[0].ID, n2.Changes[0].ID)
+	}
+}
+
 func fileChanges(t *testing.T, dir, base, rel string) (*repoChanges, *fileDiff) {
 	t.Helper()
 	rc := gitRepoChanges(dir, base)
@@ -104,7 +185,7 @@ func TestGitRepoChanges_BranchAgainstMain(t *testing.T) {
 
 	rc, d := fileChanges(t, dir, "", "a.go")
 	want := []lineChange{{Kind: "mod", Start: 1, End: 1}, {Kind: "add", Start: 4, End: 4}}
-	if rc.Base != "main" || len(rc.Files) != 1 || d.Status != "M" || !reflect.DeepEqual(d.Changes, want) {
+	if rc.Base != "main" || len(rc.Files) != 1 || d.Status != "M" || !reflect.DeepEqual(noIDs(d.Changes), want) {
 		t.Fatalf("got %+v, a.go %+v", rc, d)
 	}
 }
@@ -116,7 +197,7 @@ func TestGitRepoChanges_OnMainShowsUncommitted(t *testing.T) {
 	}
 	writeFile(t, filepath.Join(dir, "a.go"), "1\n")
 	_, d := fileChanges(t, dir, "", "a.go")
-	if d == nil || d.Status != "M" || !reflect.DeepEqual(d.Changes, []lineChange{{Kind: "del", Start: 0, End: 0}}) {
+	if d == nil || d.Status != "M" || !reflect.DeepEqual(noIDs(d.Changes), []lineChange{{Kind: "del", Start: 0, End: 0}}) {
 		t.Fatalf("got %+v", d)
 	}
 }
@@ -136,7 +217,7 @@ func TestGitRepoChanges_Statuses(t *testing.T) {
 	rc := gitRepoChanges(dir, "")
 	got := map[string]string{}
 	for rel, d := range rc.Files {
-		got[rel] = d.Status + fmt.Sprint(d.Changes)
+		got[rel] = d.Status + runsString(d.Changes)
 	}
 	want := map[string]string{
 		"edit.go":                        "M[{mod 0 0}]",
@@ -175,7 +256,7 @@ func TestGitRepoChanges_ChosenBase(t *testing.T) {
 	git(t, dir, "commit", "-q", "-am", "feature work")
 
 	// Against release, only the feature commit shows; against main, both
-	if rc, d := fileChanges(t, dir, "release", "a.go"); rc.Base != "release" || !reflect.DeepEqual(d.Changes, []lineChange{{Kind: "mod", Start: 0, End: 0}}) {
+	if rc, d := fileChanges(t, dir, "release", "a.go"); rc.Base != "release" || !reflect.DeepEqual(noIDs(d.Changes), []lineChange{{Kind: "mod", Start: 0, End: 0}}) {
 		t.Fatalf("release: got %+v %+v", rc, d)
 	}
 	if rc, d := fileChanges(t, dir, "main", "a.go"); rc.Base != "main" || len(d.Changes) != 2 {
@@ -235,7 +316,7 @@ func TestProjectChanges(t *testing.T) {
 	pc := s.projects["p"].changes("")
 	var got []string
 	for _, f := range pc.Files {
-		got = append(got, f.Rel+" "+f.Status+" "+fmt.Sprint(f.Changes))
+		got = append(got, f.Rel+" "+f.Status+" "+runsString(f.Changes))
 		if f.Path != filepath.Join(root, f.Rel) {
 			t.Errorf("path %q for %q", f.Path, f.Rel)
 		}
@@ -257,7 +338,7 @@ func TestHandleChangesAndBranches(t *testing.T) {
 		return rec.Body.String()
 	}
 	body := get("/api/changes", url.Values{"project": {"p"}, "base": {"main"}})
-	if !strings.Contains(body, `"base":"main"`) || !strings.Contains(body, `"rel":"b.go","status":"M","changes":[{"kind":"add","start":1,"end":1}]`) {
+	if !strings.Contains(body, `"base":"main"`) || !strings.Contains(body, `"rel":"b.go","status":"M","changes":[{"kind":"add","start":1,"end":1,"id":"`) {
 		t.Fatalf("changes: %s", body)
 	}
 	if body := get("/api/branches", url.Values{"project": {"p"}}); body != `["main","dev"]`+"\n" {

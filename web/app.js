@@ -218,7 +218,13 @@ const S = {
   changes: null,        // /api/changes result: { base, files: [{ path, rel, status, changes }] }
   chgByPath: new Map(), // path -> changed file
   chgDirs: new Set(),   // rel dirs that contain changed files
+  chgStops: [],         // every run of changed lines, in path and line order (see review.js)
+  chgPending: new Set(),// rel dirs that contain changed files not fully reviewed
+  reviewList: [],       // keys of the changes marked reviewed, most recent last
+  reviewed: new Set(),  // the same, for lookups
+  chgFilter: store.get('chgFilter', 'all'), // which changes the arrows step through: 'all' or 'pending'
 };
+const MAX_REVIEWED = 20000;
 
 const proj = () => S.projects.find(p => p.id === S.pid);
 const relInProject = path => { const p = proj(); return p && path.startsWith(p.path + '/') ? path.slice(p.path.length + 1) : null; };
@@ -244,6 +250,8 @@ async function switchProject(pid, { restore = true, skipActive = false } = {}) {
   S.files.clear(); S.tabs = []; S.active = null; S.tree.clear(); S.treeSel = null; S.treeVersion = -1; S.status = {};
   S.pid = pid;
   S.base = store.get('base.' + pid, '');
+  S.reviewList = store.get('reviewed.' + pid, []);
+  S.reviewed = new Set(S.reviewList);
   setChanges(null);
   const p = proj();
   S.expanded = new Set(store.get('expanded.' + pid, []));
@@ -429,13 +437,13 @@ function renderTree() {
       if (e.dir) {
         const open = S.expanded.has(rel) && S.tree.has(rel);
         if (open) cls.push('open');
-        if (S.chgDirs.has(rel)) cls.push('chg-M');
+        if (S.chgPending.has(rel)) cls.push('chg-M');
         out.push(`<div class="${cls.join(' ')}" data-p="${esc(rel)}" data-d="1" style="padding-left:${pad}px" title="${e.reason ? esc(e.reason) : ''}"><span class="tw">${ICON.chev}</span>${e.ignored ? ICON.folderIgn : ICON.folder}<span class="tn">${esc(e.name)}</span>${gitBadge(e.branch, e.dirty)}</div>`);
         if (open) walk(rel, depth + 1);
       } else {
         if (e.name.endsWith('_test.go')) cls.push('test');
-        const c = S.chgByPath.get(p.path + '/' + rel);
-        if (c) cls.push('chg-' + c.status);
+        const chg = changeClass(p.path + '/' + rel);
+        if (chg) cls.push(chg);
         out.push(`<div class="${cls.join(' ')}" data-p="${esc(rel)}" style="padding-left:${pad}px" title="${e.reason ? esc(e.reason) : ''}"><span class="tw"></span>${fileIcon(e.name)}<span class="tn">${esc(e.name)}</span></div>`);
       }
     }
@@ -648,7 +656,6 @@ function renderRows(f) {
 
 // ---- changes against the base branch (main): gutter bars, tree and tab colors, next/previous change
 
-const DIFF_TITLES = { add: 'Added', mod: 'Changed', del: 'Deleted lines below' };
 let changesSeq = 0, changesTimer;
 
 async function loadChanges() {
@@ -663,33 +670,120 @@ function scheduleChanges() { clearTimeout(changesTimer); changesTimer = setTimeo
 function setChanges(res) {
   S.changes = res;
   S.chgByPath = new Map();
+  for (const c of res ? res.files : []) S.chgByPath.set(c.path, c);
+  S.chgStops = changeStops(res ? res.files : []);
+  renderReview();
+}
+
+// renderReview redraws everything that shows changes or their review marks.
+function renderReview() {
   S.chgDirs = new Set();
-  for (const c of res ? res.files : []) {
-    S.chgByPath.set(c.path, c);
-    for (let d = c.rel.lastIndexOf('/'); d > 0; d = c.rel.lastIndexOf('/', d - 1)) S.chgDirs.add(c.rel.slice(0, d));
+  S.chgPending = new Set();
+  for (const c of S.changes ? S.changes.files : []) {
+    const pending = fileReview(S.chgStops, c.path, S.reviewed) !== 'all';
+    for (let d = c.rel.lastIndexOf('/'); d > 0; d = c.rel.lastIndexOf('/', d - 1)) {
+      S.chgDirs.add(c.rel.slice(0, d));
+      if (pending) S.chgPending.add(c.rel.slice(0, d));
+    }
   }
   for (const f of S.files.values()) if (f) renderDiff(f);
   renderTree(); renderTabs(); renderChangesWidget();
 }
 
-// changeStops lists every change in the project in path and line order, one per run of lines.
-function changeStops() {
-  const stops = [];
-  for (const c of S.changes ? S.changes.files : []) {
-    if (!c.changes.length) { stops.push({ path: c.path, rel: c.rel, line: 0 }); continue; }
-    for (const ch of c.changes) stops.push({ path: c.path, rel: c.rel, line: Math.max(0, ch.start) });
-  }
-  return stops;
+// navStops are the changes the arrows step through: all of them, or the ones not reviewed yet.
+function navStops() {
+  return S.chgFilter === 'pending' ? S.chgStops.filter(st => !S.reviewed.has(st.key)) : S.chgStops;
 }
 
-async function goChange(dir) {
-  const stops = changeStops();
-  if (!stops.length) { toast(S.changes ? `No changes against ${S.changes.base}` : 'No changes'); return; }
+// changeClass is the tree/tab class of a changed file: its status, or "done" once fully reviewed.
+function changeClass(path) {
+  const c = S.chgByPath.get(path);
+  if (!c) return '';
+  return fileReview(S.chgStops, path, S.reviewed) === 'all' ? 'chg-done' : 'chg-' + c.status;
+}
+
+function setReviewed(keys, on) {
+  S.reviewList = markKeys(S.reviewList, keys, on, MAX_REVIEWED);
+  S.reviewed = new Set(S.reviewList);
+  store.set('reviewed.' + S.pid, S.reviewList);
+  renderReview();
+}
+
+// toggleReviewed checks off the change at the caret and moves on to the next unreviewed one, or
+// clears the mark if it was checked.
+function toggleReviewed() {
+  const f = S.files.get(S.active);
+  const i = f ? stopIndexAt(S.chgStops, f.path, f.caret.line) : -1;
+  if (i < 0) { toast('No change at the caret'); return; }
+  const key = S.chgStops[i].key, on = !S.reviewed.has(key);
+  setReviewed([key], on);
+  if (on) goNextUnreviewed();
+  else toast('Change marked as not reviewed', 1200);
+}
+
+// toggleFileReviewed checks off every change in the open file, or clears them if all are checked.
+function toggleFileReviewed() {
+  const f = S.files.get(S.active);
+  const state = f ? fileReview(S.chgStops, f.path, S.reviewed) : null;
+  if (!state) { toast('No changes in this file'); return; }
+  setReviewed(S.chgStops.filter(st => st.path === f.path).map(st => st.key), state !== 'all');
+  if (state !== 'all') goNextUnreviewed();
+  else toast('File marked as not reviewed', 1200);
+}
+
+// goNextUnreviewed jumps to the next change not reviewed yet, whatever the filter.
+function goNextUnreviewed() {
+  const pending = S.chgStops.filter(st => !S.reviewed.has(st.key));
+  if (!pending.length) { toast('No more changes'); return; }
+  goChange(1, pending);
+}
+
+function setChangeFilter(mode) {
+  S.chgFilter = mode;
+  store.set('chgFilter', mode);
+  renderChangesWidget();
+  toast(mode === 'pending' ? 'Stepping through unreviewed changes' : 'Stepping through all changes', 1500);
+}
+
+function openReviewMenu(anchor) {
+  const check = on => `<span class="mcheck">${on ? '✓' : ''}</span>`;
+  const item = (on, label, key, action) => ({ html: `${check(on)}<span>${esc(label)}</span>${key ? `<span class="msub">${esc(key)}</span>` : ''}`, action });
+  const f = S.files.get(S.active);
+  const atChange = f && stopIndexAt(S.chgStops, f.path, f.caret.line) >= 0;
+  const fileState = f ? fileReview(S.chgStops, f.path, S.reviewed) : null;
+  const items = [
+    item(S.chgFilter === 'all', 'All changes', 'U', () => setChangeFilter('all')),
+    item(S.chgFilter === 'pending', 'Unreviewed changes', 'U', () => setChangeFilter('pending')),
+    'sep',
+  ];
+  if (atChange) items.push(item(false, 'Toggle reviewed: change at caret', 'X', toggleReviewed));
+  if (fileState) items.push(item(false, fileState === 'all' ? 'Mark file as not reviewed' : 'Mark file as reviewed', 'Shift+X', toggleFileReviewed));
+  const mine = new Set(S.chgStops.map(st => st.key));
+  if (S.reviewList.some(k => mine.has(k))) items.push(item(false, 'Clear all review marks', '', () => setReviewed([...mine], false)));
+  showMenu(anchor, items);
+}
+
+// goFileChange cycles through the changes of the open file only.
+function goFileChange(dir) {
+  const f = S.files.get(S.active);
+  const st = f ? nextInFile(navStops(), f.path, f.caret.line, dir) : null;
+  if (!st) { toast(S.chgFilter === 'pending' && f && S.chgByPath.has(f.path) ? 'All changes in this file are reviewed' : 'No changes in this file'); return; }
+  setCaret(f, st.line, 0);
+  if (f.mdEl && f.mdMode === 'preview') setMdMode(f, 'split', false);
+  f.el.scrollTop = st.line * LH - f.el.clientHeight / 3;
+  recordHistory(false);
+}
+
+async function goChange(dir, stops = navStops()) {
+  if (!stops.length) {
+    if (S.chgStops.length) toast('All changes are reviewed');
+    else toast(S.changes ? `No changes against ${S.changes.base}` : 'No changes');
+    return;
+  }
   const f = S.files.get(S.active);
   const rel = (S.active && relInProject(S.active)) || '', line = f ? f.caret.line : -1;
-  const cmp = st => st.rel < rel ? -1 : st.rel > rel ? 1 : st.line - line;
-  let st = dir > 0 ? stops.find(x => cmp(x) > 0) : [...stops].reverse().find(x => cmp(x) < 0);
-  if (!st) { st = dir > 0 ? stops[0] : stops[stops.length - 1]; toast(dir > 0 ? 'Wrapped to the first change' : 'Wrapped to the last change', 1500); }
+  const { stop: st, wrapped } = nextStop(stops, rel, line, dir);
+  if (wrapped) toast(dir > 0 ? 'Wrapped to the first change' : 'Wrapped to the last change', 1500);
   const nf = await openFile(st.path, { line: st.line, col: 0 }).catch(() => null);
   if (!nf) return;
   // The start of the change lands about a third from the top, so what follows it is visible
@@ -705,10 +799,40 @@ function renderChangesWidget() {
   const c = S.changes;
   w.classList.toggle('hidden', !c || !c.base);
   if (!c || !c.base) return;
-  const n = c.files.length;
+  const n = c.files.length, total = S.chgStops.length;
+  const done = S.chgStops.filter(st => S.reviewed.has(st.key)).length;
   $('#tbBaseName').textContent = c.base;
   $('#chgCount').textContent = n ? `${n.toLocaleString()} file${n === 1 ? '' : 's'} changed` : 'No changes';
-  $('#chgPrev').disabled = $('#chgNext').disabled = !n;
+  $('#chgReviewed').textContent = n ? `, ${done}/${total} reviewed` : '';
+  $('#chgReviewed').classList.toggle('all', n > 0 && done === total);
+  const pending = S.chgFilter === 'pending';
+  $('#chgFilterName').textContent = pending ? 'Unreviewed' : 'All';
+  $('#chgFilter').classList.toggle('on', pending);
+  $('#chgFilter').classList.toggle('hidden', !n);
+  $('#chgPrev').disabled = $('#chgNext').disabled = !navStops().length;
+  updateChangePos();
+}
+
+// updateChangePos shows "n/m" between the arrows, n being the change the caret is in ("-" if none),
+// for all changes and for the open file's.
+function updateChangePos() {
+  const el = $('#chgPos');
+  if (!el) return;
+  const stops = navStops(), f = S.files.get(S.active), line = f ? f.caret.line : -1;
+  const i = f ? stopIndexAt(stops, f.path, line) : -1;
+  el.textContent = S.chgStops.length ? `${i < 0 ? '-' : i + 1}/${stops.length}` : '';
+  const mine = f ? stops.filter(st => st.path === f.path) : [];
+  const j = f ? stopIndexAt(mine, f.path, line) : -1;
+  const changed = !!f && S.chgByPath.has(f.path);
+  $('#chgFile').classList.toggle('hidden', !changed);
+  $('#chgFilePos').textContent = `${j < 0 ? '-' : j + 1}/${mine.length}`;
+  $('#chgFileUp').disabled = $('#chgFileDown').disabled = !mine.length;
+  // The checkbox shows and toggles the change at the caret
+  const k = changed ? stopIndexAt(S.chgStops, f.path, line) : -1;
+  const mark = $('#chgMark');
+  mark.disabled = k < 0;
+  mark.classList.toggle('on', k >= 0 && S.reviewed.has(S.chgStops[k].key));
+  mark.title = k < 0 ? 'Put the caret in a change to mark it as reviewed' : S.reviewed.has(S.chgStops[k].key) ? 'Reviewed; click to clear (X)' : 'Mark change as reviewed and go to the next (X)';
 }
 
 async function openBaseMenu(anchor) {
@@ -725,24 +849,25 @@ async function openBaseMenu(anchor) {
 
 function renderDiff(f) {
   if (!f.rowEls) return;
-  f.rowsEl.querySelectorAll('.chg').forEach(r => { r.classList.remove('chg', 'chg-add', 'chg-mod', 'chg-del', 'chg-del-top'); r.firstChild.title = ''; });
+  f.rowsEl.querySelectorAll('.chg').forEach(r => { r.classList.remove('chg', 'chg-add', 'chg-mod', 'chg-del', 'chg-del-top', 'chg-ok'); });
   const d = S.chgByPath.get(f.path);
   if (!d) return;
-  const n = f.rowEls.length, since = ` since ${S.changes.base}`;
+  const n = f.rowEls.length;
   for (const c of d.changes) {
+    const ok = S.reviewed.has(d.rel + '\n' + c.id);
     if (c.kind === 'del') {
       const row = f.rowEls[Math.min(Math.max(c.start, 0), n - 1)];
       if (!row || row.classList.contains('chg')) continue; // an add/mod bar on the same line wins
       row.classList.add('chg', 'chg-del');
       if (c.start < 0) row.classList.add('chg-del-top');
-      row.firstChild.title = (c.start < 0 ? 'Deleted lines above' : DIFF_TITLES.del) + since;
+      row.classList.toggle('chg-ok', ok);
       continue;
     }
     for (let i = c.start; i <= c.end && i < n; i++) {
       const row = f.rowEls[i];
       row.classList.remove('chg-del', 'chg-del-top');
       row.classList.add('chg', 'chg-' + c.kind);
-      row.firstChild.title = DIFF_TITLES[c.kind] + since;
+      row.classList.toggle('chg-ok', ok);
     }
   }
 }
@@ -865,7 +990,7 @@ function closeTab(path, quiet) {
 
 function renderTabs() {
   const el = $('#tabs');
-  const chg = p => { const c = S.chgByPath.get(p); return c ? ` class="chg-${c.status}"` : ''; };
+  const chg = p => { const c = changeClass(p); return c ? ` class="${c}"` : ''; };
   el.innerHTML = S.tabs.map(p => `<div class="tab ${p === S.active ? 'active' : ''}" data-p="${esc(p)}" title="${esc(p)}">${fileIcon(basename(p))}<span${chg(p)}>${esc(basename(p))}</span><span class="tx-close"><svg viewBox="0 0 16 16" width="11" height="11"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></span></div>`).join('');
   const act = $('.tab.active', el);
   if (act) { const er = act.getBoundingClientRect(), cr = el.getBoundingClientRect(); if (er.left < cr.left) el.scrollLeft -= cr.left - er.left; else if (er.right > cr.right) el.scrollLeft += er.right - cr.right; }
@@ -1118,6 +1243,8 @@ function attachEditorEvents(f) {
     hidePopup();
     const sticky = e.target.closest('.sticky-rows .row');
     if (sticky) { e.preventDefault(); const l = +sticky.dataset.l; openFile(f.path, { line: l, col: 0, center: true }); return; }
+    const bar = changeBarAt(e);
+    if (bar) { e.preventDefault(); clearTimeout(hoverTimer); showOldCode(f, +bar.parentNode.dataset.l); return; }
     const gutter = e.target.closest('.rows .row .no');
     if (gutter) {
       // GitHub-style line selection: click a line number, shift+click to extend, ctrl+click to add.
@@ -1149,6 +1276,11 @@ function attachEditorEvents(f) {
     setCaret(f, pos.line, pos.col, { scroll: false });
   });
   el.addEventListener('mousemove', e => {
+    const bar = changeBarAt(e);
+    if (bar) {
+      if (hoverEl !== bar) { hoverEl = bar; clearTimeout(hoverTimer); clearTimeout(popupHideTimer); hoverTimer = setTimeout(() => showOldCode(f, +bar.parentNode.dataset.l), 200); }
+      return;
+    }
     const tk = e.target.closest('.rows .tk');
     if (e.ctrlKey || e.metaKey) { setLink(tk); }
     else setLink(null);
@@ -1517,7 +1649,47 @@ async function showHover(f, span) {
   p.style.left = Math.max(8, Math.min(r.left, innerWidth - pw - 12)) + 'px';
 }
 function schedulePopupHide() { clearTimeout(popupHideTimer); popupHideTimer = setTimeout(hidePopup, 300); }
-function hidePopup() { clearTimeout(popupHideTimer); $('#popup').classList.add('hidden'); }
+function hidePopup() { clearTimeout(popupHideTimer); $('#popup').classList.add('hidden'); delete $('#popup').dataset.old; }
+
+// showOldCode shows what a changed or deleted run looked like in the base, below the run.
+function showOldCode(f, line) {
+  const d = S.chgByPath.get(f.path);
+  const c = d && changeAtLine(d.changes, line);
+  if (!c) { toast('No change at the caret'); return; }
+  if (!c.old || !c.old.length) { toast('New lines, there is no old code'); return; }
+  const lines = c.old, from = c.oldStart + 1, to = from + lines.length + (c.oldMore || 0) - 1;
+  const fake = { lines, lex: f.lang === 'go' ? lexGo(lines) : lexGeneric(lines, f.lang), sem: null, hints: null };
+  const p = $('#popup');
+  p.innerHTML = `<div class="old-head">${c.kind === 'del' ? 'Deleted' : 'Before'}, in ${esc(S.changes.base)} (line${to > from ? `s ${from}-${to}` : ' ' + from})</div>` +
+    `<div class="old-code">${lines.map((_, j) => `<div class="orow"><span class="ono">${from + j}</span><span>${lineHTML(fake, j)}</span></div>`).join('')}` +
+    (c.oldMore ? `<div class="old-more">... ${c.oldMore} more line${c.oldMore === 1 ? '' : 's'}</div>` : '') + '</div>';
+  p.dataset.old = d.rel + '\n' + c.id;
+  p.classList.remove('hidden');
+  // Below the run, or above it when there is no room
+  const n = f.rowEls.length;
+  const top = f.rowEls[Math.min(Math.max(c.start, 0), n - 1)].getBoundingClientRect();
+  const bottom = f.rowEls[Math.min(Math.max(c.end, 0), n - 1)].getBoundingClientRect();
+  const tx = $('.tx', f.rowEls[Math.min(Math.max(c.start, 0), n - 1)]).getBoundingClientRect();
+  const ph = p.offsetHeight, pw = p.offsetWidth;
+  let y = bottom.bottom + 2;
+  if (y + ph > innerHeight - 30) y = Math.max(8, top.top - ph - 2);
+  p.style.top = y + 'px';
+  p.style.left = Math.max(8, Math.min(tx.left, innerWidth - pw - 12)) + 'px';
+}
+
+// toggleOldCode shows or hides the old code of the change at the caret.
+function toggleOldCode() {
+  const f = S.files.get(S.active);
+  if (!f || !f.rowEls) return;
+  if (!$('#popup').classList.contains('hidden') && $('#popup').dataset.old) { hidePopup(); return; }
+  showOldCode(f, f.caret.line);
+}
+
+// changeBarAt is the line-number cell under the mouse when it is over a change marker, else null.
+function changeBarAt(e) {
+  const no = e.target.closest && e.target.closest('.rows .row.chg .no');
+  return no && e.clientX > no.getBoundingClientRect().right - 18 ? no : null;
+}
 
 function renderMarkdown(md) {
   const parts = md.split(/```(\w*)\n([\s\S]*?)```/);
@@ -2177,7 +2349,7 @@ function openHelp() {
     ['Ctrl+E', 'Recent files'], ['Ctrl+F12', 'File structure'], ['Alt+F1', 'Select opened file in project tree'], ['Click / Shift+Click line number', 'Highlight a line / range (Ctrl+Click adds a range); the URL becomes a deep link'],
     ['Alt+Shift+C', 'Copy deep link to the highlighted lines, selection or caret line'], ['F8 / Shift+F8', 'Next / previous walkthrough step'],
     ['Alt+1', 'Focus project tree'], ['Esc', 'Close popup / usages pane, back to editor'], ['Ctrl+F', 'Find in file (browser find)'],
-    ['Hover', 'Quick documentation'], ['Ctrl+Scroll', 'Zoom the editor font or the Markdown preview (Ctrl+0 resets)'], ['F7 / Shift+F7', 'Next / previous change against the base branch (also Ctrl+Alt+Shift+↓ / ↑)'], ['Middle-click tab', 'Close tab'],
+    ['Hover', 'Quick documentation'], ['Ctrl+Scroll', 'Zoom the editor font or the Markdown preview (Ctrl+0 resets)'], ['Alt+↓ / Alt+↑', 'Next / previous change against the base branch, across files (also F7 / Shift+F7)'], ['Ctrl+Alt+Shift+↓ / ↑', 'Next / previous change in this file'], ['X or Y / Shift+X or Shift+Y', 'Mark the change at the caret / the whole file as reviewed and go to the next unreviewed change (again to clear)'], ['U', 'Step through all changes or only unreviewed ones'], ['D', 'Show / hide the old code of the change at the caret (or hover its gutter marker)'], ['Middle-click tab', 'Close tab'],
   ];
   m.innerHTML = `<div class="help"><h2>Keyboard shortcuts</h2>${rows.map(r => `<kbd>${esc(r[0])}</kbd><span>${esc(r[1])}</span>`).join('')}</div>`;
   document.body.appendChild(m);
@@ -2215,6 +2387,7 @@ async function pollStatus() {
 function updateStatusBar() {
   const f = S.files.get(S.active);
   $('#sbPos').textContent = f ? `${f.caret.line + 1}:${f.caret.col + 1}` : '';
+  updateChangePos();
   updateLinkButton();
   $('#sbIndent').textContent = f ? f.indent : '';
   $('#tbBranchName').textContent = f && f.branch ? f.branch : '';
@@ -2266,7 +2439,12 @@ function initKeys() {
     else if (mod && e.key === 'F12') { e.preventDefault(); openFinder('structure'); }
     else if (e.key === 'F8' && !mod && !e.altKey && S.tour) { e.preventDefault(); goStep(S.tour.step + (e.shiftKey ? -1 : 1)); }
     else if (e.altKey && e.shiftKey && !mod && k === 'c') { e.preventDefault(); copyLink(); }
-    else if ((e.key === 'F7' && !mod && !e.altKey) || (mod && e.altKey && e.shiftKey && (e.key === 'ArrowDown' || e.key === 'ArrowUp'))) { e.preventDefault(); goChange(e.key === 'ArrowUp' || (e.key === 'F7' && e.shiftKey) ? -1 : 1); }
+    else if (e.key === 'F7' && !mod && !e.altKey) { e.preventDefault(); goChange(e.shiftKey ? -1 : 1); }
+    else if (e.altKey && !mod && !e.shiftKey && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) { e.preventDefault(); goChange(e.key === 'ArrowUp' ? -1 : 1); }
+    else if (!mod && !e.altKey && (k === 'x' || k === 'y') && !document.querySelector('.modal')) { e.preventDefault(); e.shiftKey ? toggleFileReviewed() : toggleReviewed(); }
+    else if (!mod && !e.altKey && !e.shiftKey && k === 'd' && !document.querySelector('.modal')) { e.preventDefault(); toggleOldCode(); }
+    else if (!mod && !e.altKey && !e.shiftKey && k === 'u' && !document.querySelector('.modal')) { e.preventDefault(); setChangeFilter(S.chgFilter === 'pending' ? 'all' : 'pending'); }
+    else if (mod && e.altKey && e.shiftKey && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) { e.preventDefault(); goFileChange(e.key === 'ArrowUp' ? -1 : 1); }
     else if (e.altKey && !mod && e.key === 'F1') { e.preventDefault(); locateInTree(); }
     else if (mod && !e.altKey && !e.shiftKey && e.key === '0' && f && $('#editorWrap').contains(document.activeElement)) { e.preventDefault(); resetZoom(f); }
     else if (e.altKey && !mod && e.key === '1') { e.preventDefault(); $('#tree').focus(); }
@@ -2285,7 +2463,7 @@ function initKeys() {
   window.addEventListener('blur', () => { ctrlDown = false; setLink(null); });
   window.addEventListener('focus', () => { const f = S.files.get(S.active); if (f) reloadIfChanged(f); pollStatus(); });
   document.addEventListener('mousedown', e => {
-    if (!e.target.closest('#menu') && !e.target.closest('#projBtn') && !e.target.closest('#tbProject') && !e.target.closest('#tbBase')) hideMenu();
+    if (!e.target.closest('#menu') && !e.target.closest('#projBtn') && !e.target.closest('#tbProject') && !e.target.closest('#tbBase') && !e.target.closest('#chgFilter')) hideMenu();
     if (!e.target.closest('#popup')) hidePopup();
   });
   $('#popup').addEventListener('mouseenter', () => clearTimeout(popupHideTimer));
@@ -2322,6 +2500,10 @@ async function boot() {
   $('#tbBase').addEventListener('click', e => openBaseMenu(e.currentTarget));
   $('#chgPrev').addEventListener('click', () => goChange(-1));
   $('#chgNext').addEventListener('click', () => goChange(1));
+  $('#chgFileUp').addEventListener('click', () => goFileChange(-1));
+  $('#chgFileDown').addEventListener('click', () => goFileChange(1));
+  $('#chgMark').addEventListener('click', toggleReviewed);
+  $('#chgFilter').addEventListener('click', e => openReviewMenu(e.currentTarget));
   $('#tbSearch').addEventListener('click', () => openFinder('files'));
   $('#tbHelp').addEventListener('click', openHelp);
   $('#sbLink').addEventListener('click', copyLink);

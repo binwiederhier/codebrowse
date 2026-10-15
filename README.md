@@ -39,9 +39,16 @@ It is a single Go binary with no dependencies outside the standard library. The 
 - **Changes against main**, as in IntelliJ:
   - Thin bars next to the line numbers mark lines added (green) or changed (blue) on your branch, and a grey wedge marks deleted lines.
   - Changed files are colored in the tree and tabs, and so are the folders that contain them.
-  - The arrows at the top right (or **F7** / **Shift+F7**) jump to the next or previous change across all files and reveal the file in the tree.
+  - The left/right arrows at the top right (or **Alt+↓/↑**, **F7** / **Shift+F7**) jump to the next or previous change across all files and reveal the file in the tree. The up/down arrows next to them (or **Ctrl+Alt+Shift+↓/↑**) cycle through the changes in the open file. Each shows where you are, e.g. `2/27`.
+  - Review marks, like GitHub's "Viewed": **X** or **Y** (or the checkbox next to the up/down arrows) checks off the change at the caret and jumps to the next unreviewed one ("No more changes" when none are left), **Shift+X** / **Shift+Y** does the same for the whole file; press again on a checked change to clear it. Reviewed changes get a faint gutter bar, fully reviewed files a check in the tree and tabs, and the top bar counts e.g. `3/12 reviewed`. A mark follows the change's content, so it stays when other lines move and clears when the change itself is edited. Marks are kept in the browser, per project.
+  - Hover the blue or gray gutter marker of a change (or click it, or press **D** with the caret in the change) to see the old code from the base branch in a popup.
+  - The filter left of the arrows (or **U**) switches between stepping through all changes and only the unreviewed ones, for a review done entirely from the keyboard: read, **X**, read, **X**, ...
   - The comparison is against where your branch left `main` (or `master`, `origin/main`, `origin/master`), including uncommitted edits; on `main` itself it shows uncommitted edits only. The "vs main" dropdown next to the arrows picks another branch, remembered per project.
 - **Zoom**: Ctrl+Scroll (or pinch) over the editor or the Markdown preview zooms just that pane, not the whole page. Ctrl+0 resets it.
+
+| Changes and review marks | Old code of a changed section | Review filter |
+|---|---|---|
+| [![Changes against main, with reviewed files checked off](docs/review-changes.png)](docs/review-changes.png) | [![The old code from main in a popup](docs/review-oldcode.png)](docs/review-oldcode.png) | [![The review menu: all or unreviewed changes, and review marks](docs/review-filter.png)](docs/review-filter.png) |
 
 Other file types (YAML, JS/TS, SQL, proto, …) get basic syntax highlighting but no navigation.
 
@@ -194,6 +201,7 @@ make restart                                                    # deploy to the 
 | `web/` | The UI: `index.html`, `app.css`, `app.js`. |
 | `web/markdown.js` | The Markdown preview renderer and its HTML sanitizer. Tests are in `test/`. |
 | `web/projtree.js` | Groups the project list into the folder tree of the project menu. Tests are in `test/`. |
+| `web/review.js` | Change navigation and review marks. Tests are in `test/`. |
 | `web/vendor/` | Mermaid (MIT), vendored as a single file so diagrams render without internet access. |
 
 ## Instructions for Claude (AI coding agents)
