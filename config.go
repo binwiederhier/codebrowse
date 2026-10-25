@@ -12,21 +12,23 @@ import (
 )
 
 type projectConfig struct {
-	ID          string `json:"id"`
-	Name        string `json:"name"`
-	Path        string `json:"path"`
-	ShowIgnored bool   `json:"show_ignored,omitempty"`
-	Auto        bool   `json:"auto,omitempty"` // discovered, not persisted
+	ID          string  `json:"id"`
+	Name        string  `json:"name"`
+	Path        string  `json:"path"`
+	ShowIgnored bool    `json:"show_ignored,omitempty"`
+	Auto        bool    `json:"auto,omitempty"` // discovered, not persisted
+	PR          *prMeta `json:"pr,omitempty"`   // set for a checked-out GitHub pull request
 }
 
 type config struct {
-	Listen    string           `json:"listen"`
-	PublicURL string           `json:"public_url,omitempty"` // base URL in printed links, e.g. http://devbox:7878
-	Password  string           `json:"password"`
-	Secret    string           `json:"secret"`
-	Projects  []*projectConfig `json:"projects"`
-	Discover  []string         `json:"discover"` // globs; each matching directory becomes a project
-	Hidden    []string         `json:"hidden"`   // discovered paths removed by the user
+	Listen      string           `json:"listen"`
+	PublicURL   string           `json:"public_url,omitempty"` // base URL in printed links, e.g. http://devbox:7878
+	Password    string           `json:"password"`
+	Secret      string           `json:"secret"`
+	Projects    []*projectConfig `json:"projects"`
+	Discover    []string         `json:"discover"`               // globs; each matching directory becomes a project
+	Hidden      []string         `json:"hidden"`                 // discovered paths removed by the user
+	GitHubToken string           `json:"github_token,omitempty"` // for private repos; else "gh auth token"
 
 	mu   sync.Mutex
 	path string

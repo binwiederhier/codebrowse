@@ -25,11 +25,13 @@
   <h1><span class="logo">CB</span>Codebrowse</h1>
   <label for="pw">Password</label>
   <input id="pw" name="password" type="password" autofocus autocomplete="current-password">
+  <input type="hidden" name="next" id="next">
   <button type="submit">Sign in</button>
   <div class="err" id="err"></div>
 </form>
 <script>
   if (location.search.includes('failed')) document.getElementById('err').textContent = 'Wrong password';
+  document.getElementById('next').value = new URLSearchParams(location.search).get('next') || '/';
 </script>
 </body>
 </html>

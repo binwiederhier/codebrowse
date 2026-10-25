@@ -83,6 +83,13 @@ func (p *project) startIndexing() {
 	p.started.Do(func() { go p.indexLoop() })
 }
 
+// pr is the pull request the project is a checkout of, or nil.
+func (p *project) pr() *prMeta {
+	p.srv.mu.Lock()
+	defer p.srv.mu.Unlock()
+	return p.cfg.PR
+}
+
 func (p *project) rootGit() gitInfo {
 	p.mu.RLock()
 	defer p.mu.RUnlock()

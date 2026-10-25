@@ -1,7 +1,7 @@
 // Tests for web/review.js, change navigation and review marks. Run with: node --test test/
 const test = require('node:test');
 const assert = require('node:assert');
-const { changeStops, nextStop, nextInFile, stopIndexAt, fileReview, markKeys, changeAtLine } = require('../web/review.js');
+const { changeStops, nextStop, nextInFile, stopIndexAt, fileReview, markKeys, changeAtLine, changedFirst } = require('../web/review.js');
 
 const files = [
   { path: '/p/a.go', rel: 'a.go', changes: [{ kind: 'mod', start: 4, end: 6, id: 'x' }, { kind: 'del', start: -1, end: -1, id: 'y' }] },
@@ -59,4 +59,14 @@ test('finds the change drawn on a line, an added or changed run winning over a d
   assert.strictEqual(changeAtLine(changes, 5), changes[1]);
   assert.strictEqual(changeAtLine(changes, 8), changes[3]);
   assert.strictEqual(changeAtLine(changes, 7), null);
+});
+
+test('puts matching changed files first in file search, keeping the order otherwise', () => {
+  const results = ['server.go', 'server_test.go', 'cmd/serve.go', 'web/server.js'];
+  assert.deepStrictEqual(changedFirst(results, ['cmd/serve.go', 'web/server.js', 'other.go'], 'serv'), ['cmd/serve.go', 'web/server.js', 'server.go', 'server_test.go']);
+  // A changed file that matches but fell off the server's result list is added
+  assert.deepStrictEqual(changedFirst(['a/server.go'], ['deep/x/server_util.go', 'readme.md'], 'srv'), ['deep/x/server_util.go', 'a/server.go']);
+  // With a slash, the query matches whole paths
+  assert.deepStrictEqual(changedFirst([], ['web/app.js', 'app.go'], 'web/app'), ['web/app.js']);
+  assert.deepStrictEqual(changedFirst(['x.go'], [], 'x'), ['x.go']);
 });

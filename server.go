@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -50,6 +51,8 @@ type server struct {
 	mu        sync.Mutex
 	projects  map[string]*project
 	readRoots []string
+	githubDir string     // where pull requests are checked out
+	prMu      sync.Mutex // serializes fetching pull requests
 }
 
 func (s *server) routes(mux *http.ServeMux, static http.Handler) {
@@ -68,6 +71,8 @@ func (s *server) routes(mux *http.ServeMux, static http.Handler) {
 	mux.HandleFunc("GET /api/raw", s.handleRaw)
 	mux.HandleFunc("GET /api/changes", s.handleChanges)
 	mux.HandleFunc("GET /api/branches", s.handleBranches)
+	mux.HandleFunc("POST /api/github/pr", s.handleOpenPR)
+	mux.HandleFunc("GET /gh/", s.handleGitHubLink)
 	mux.HandleFunc("GET /api/semantic", s.handleSemantic)
 	mux.HandleFunc("GET /api/hints", s.handleHints)
 	mux.HandleFunc("GET /api/symbols", s.handleSymbols)
@@ -104,18 +109,27 @@ func (s *server) auth(next http.Handler) http.Handler {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		http.Redirect(w, r, "/login.html", http.StatusFound)
+		// Come back to the link after signing in
+		login := "/login.html"
+		if r.Method == http.MethodGet && r.URL.Path != "/" {
+			login += "?next=" + url.QueryEscape(r.URL.RequestURI())
+		}
+		http.Redirect(w, r, login, http.StatusFound)
 	})
 }
 
 func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	next := r.FormValue("next")
+	if !strings.HasPrefix(next, "/") || strings.HasPrefix(next, "//") || strings.HasPrefix(next, "/\\") {
+		next = "/" // only local paths, never another site
+	}
 	if subtle.ConstantTimeCompare([]byte(r.FormValue("password")), []byte(s.cfg.Password)) != 1 {
 		time.Sleep(time.Second)
-		http.Redirect(w, r, "/login.html?failed=1", http.StatusFound)
+		http.Redirect(w, r, "/login.html?failed=1&next="+url.QueryEscape(next), http.StatusFound)
 		return
 	}
 	http.SetCookie(w, &http.Cookie{Name: cookieName, Value: s.sessionToken(), Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, MaxAge: 90 * 24 * 3600})
-	http.Redirect(w, r, "/", http.StatusFound)
+	http.Redirect(w, r, next, http.StatusFound)
 }
 
 // ---- helpers ----
@@ -294,6 +308,9 @@ func (s *server) handleRemoveProject(w http.ResponseWriter, r *http.Request) {
 	}
 	p.stop()
 	delete(s.projects, id)
+	if p.cfg.PR != nil {
+		s.removePRCheckout(p.cfg.PR)
+	}
 	if p.cfg.Auto {
 		s.cfg.Hidden = append(s.cfg.Hidden, p.cfg.Path)
 	}
@@ -487,7 +504,7 @@ func (s *server) handleChanges(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, err)
 		return
 	}
-	writeJSON(w, p.changes(r.FormValue("base")))
+	writeJSON(w, p.changes(r.FormValue("base"), r.FormValue("whitespace") != "1")) // whitespace changes are hidden unless asked for
 }
 
 func (s *server) handleBranches(w http.ResponseWriter, r *http.Request) {

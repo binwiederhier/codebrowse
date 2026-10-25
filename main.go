@@ -39,7 +39,7 @@ func main() {
 		return
 	}
 	goroot, modcache := goEnv()
-	s := &server{cfg: cfg, projects: map[string]*project{}, readRoots: []string{goroot, modcache}}
+	s := &server{cfg: cfg, projects: map[string]*project{}, readRoots: []string{goroot, modcache}, githubDir: githubCacheDir()}
 	for _, p := range cfg.Projects {
 		s.projects[p.ID] = newProject(p, s)
 	}
@@ -71,4 +71,13 @@ func goEnv() (goroot, modcache string) {
 
 func defaultConfigPath() string {
 	return filepath.Join(os.Getenv("HOME"), ".config", "codebrowse", "config.json")
+}
+
+// githubCacheDir is where pull requests are checked out: ~/.cache/codebrowse/github.
+func githubCacheDir() string {
+	dir, err := os.UserCacheDir()
+	if err != nil {
+		dir = filepath.Join(os.Getenv("HOME"), ".cache")
+	}
+	return filepath.Join(dir, "codebrowse", "github")
 }

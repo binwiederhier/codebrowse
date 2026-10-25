@@ -133,6 +133,25 @@ func TestParseHunks_OldLinesCapped(t *testing.T) {
 	}
 }
 
+func TestGitRepoChanges_IgnoresWhitespace(t *testing.T) {
+	dir := newRepo(t, map[string]string{"indent.go": "a\nb\nc\n", "both.go": "x\ny\nz\n"})
+	writeFile(t, filepath.Join(dir, "indent.go"), "a\n\tb\nc\n")
+	writeFile(t, filepath.Join(dir, "both.go"), "x\n  y\nZ\n")
+	summary := func(rc *repoChanges) map[string]string {
+		got := map[string]string{}
+		for rel, d := range rc.Files {
+			got[rel] = runsString(d.Changes)
+		}
+		return got
+	}
+	if got := summary(gitRepoChanges(dir, "", true)); !reflect.DeepEqual(got, map[string]string{"both.go": "[{mod 2 2}]"}) {
+		t.Fatalf("ignoring whitespace: got %v", got)
+	}
+	if got := summary(gitRepoChanges(dir, "", false)); !reflect.DeepEqual(got, map[string]string{"indent.go": "[{mod 1 1}]", "both.go": "[{mod 1 2}]"}) {
+		t.Fatalf("with whitespace: got %v", got)
+	}
+}
+
 func TestGitRepoChanges_IDsSurviveUnrelatedEdits(t *testing.T) {
 	lines := make([]string, 100)
 	for i := range lines {
@@ -162,7 +181,7 @@ func TestGitRepoChanges_IDsSurviveUnrelatedEdits(t *testing.T) {
 
 func fileChanges(t *testing.T, dir, base, rel string) (*repoChanges, *fileDiff) {
 	t.Helper()
-	rc := gitRepoChanges(dir, base)
+	rc := gitRepoChanges(dir, base, false)
 	if rc == nil {
 		return nil, nil
 	}
@@ -192,7 +211,7 @@ func TestGitRepoChanges_BranchAgainstMain(t *testing.T) {
 
 func TestGitRepoChanges_OnMainShowsUncommitted(t *testing.T) {
 	dir := newRepo(t, map[string]string{"a.go": "1\n2\n"})
-	if rc := gitRepoChanges(dir, ""); rc == nil || len(rc.Files) != 0 {
+	if rc := gitRepoChanges(dir, "", false); rc == nil || len(rc.Files) != 0 {
 		t.Fatalf("clean repo: got %+v", rc)
 	}
 	writeFile(t, filepath.Join(dir, "a.go"), "1\n")
@@ -214,7 +233,7 @@ func TestGitRepoChanges_Statuses(t *testing.T) {
 	if err := os.Remove(filepath.Join(dir, "sub", "gone.go")); err != nil {
 		t.Fatal(err)
 	}
-	rc := gitRepoChanges(dir, "")
+	rc := gitRepoChanges(dir, "", false)
 	got := map[string]string{}
 	for rel, d := range rc.Files {
 		got[rel] = d.Status + runsString(d.Changes)
@@ -230,7 +249,7 @@ func TestGitRepoChanges_Statuses(t *testing.T) {
 }
 
 func TestGitRepoChanges_OutsideGit(t *testing.T) {
-	if rc := gitRepoChanges(t.TempDir(), ""); rc != nil {
+	if rc := gitRepoChanges(t.TempDir(), "", false); rc != nil {
 		t.Fatalf("got %+v", rc)
 	}
 }
@@ -266,7 +285,7 @@ func TestGitRepoChanges_ChosenBase(t *testing.T) {
 	// A base the repo does not have, or anything that looks like an option, falls back to the default
 	out := filepath.Join(t.TempDir(), "pwned")
 	for _, base := range []string{"nope", "--output=" + out, "-h"} {
-		if rc := gitRepoChanges(dir, base); rc == nil || rc.Base != "main" {
+		if rc := gitRepoChanges(dir, base, false); rc == nil || rc.Base != "main" {
 			t.Fatalf("base %q: got %+v", base, rc)
 		}
 	}
@@ -313,7 +332,7 @@ func newRepoProject(t *testing.T) (*server, *http.ServeMux, string) {
 
 func TestProjectChanges(t *testing.T) {
 	s, _, root := newRepoProject(t)
-	pc := s.projects["p"].changes("")
+	pc := s.projects["p"].changes("", false)
 	var got []string
 	for _, f := range pc.Files {
 		got = append(got, f.Rel+" "+f.Status+" "+runsString(f.Changes))

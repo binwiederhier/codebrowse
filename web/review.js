@@ -60,4 +60,19 @@ function changeAtLine(changes, line) {
     changes.find(c => c.kind === 'del' && Math.max(c.start, 0) === line) || null;
 }
 
-if (typeof module !== 'undefined') module.exports = { changeStops, nextStop, nextInFile, stopIndexAt, fileReview, markKeys, changeAtLine };
+// changedFirst moves changed files (rel paths) to the top of file search results, keeping the order
+// within both groups. Changed files that match the query but missed the result limit are added.
+function changedFirst(results, changed, query) {
+  const q = query.toLowerCase(), whole = q.includes('/');
+  const matches = rel => {
+    const t = (whole ? rel : rel.slice(rel.lastIndexOf('/') + 1)).toLowerCase();
+    let i = 0;
+    for (const c of t) if (c === q[i]) i++;
+    return i === q.length; // the query's characters in order, like the server's fuzzy match
+  };
+  const listed = new Set(results), isChanged = new Set(changed);
+  const extra = changed.filter(rel => !listed.has(rel) && matches(rel));
+  return [...results.filter(r => isChanged.has(r)), ...extra, ...results.filter(r => !isChanged.has(r))];
+}
+
+if (typeof module !== 'undefined') module.exports = { changeStops, nextStop, nextInFile, stopIndexAt, fileReview, markKeys, changeAtLine, changedFirst };

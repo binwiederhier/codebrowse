@@ -59,7 +59,12 @@ type projectChanges struct {
 }
 
 // changes collects the changes of every repo in the project against base ("" for the default).
-func (p *project) changes(base string) *projectChanges {
+// A pull request is always compared with its base branch, as on GitHub.
+func (p *project) changes(base string, ignoreWS bool) *projectChanges {
+	pr := p.pr()
+	if pr != nil {
+		base = pr.BaseSHA
+	}
 	p.mu.RLock()
 	repos := make([]string, 0, len(p.git))
 	for rel := range p.git {
@@ -69,7 +74,7 @@ func (p *project) changes(base string) *projectChanges {
 	sort.Strings(repos) // the root repo ("") first, so it names the base
 	pc := &projectChanges{Files: []*fileDiff{}}
 	for _, rel := range repos {
-		rc := gitRepoChanges(filepath.Join(p.cfg.Path, rel), base)
+		rc := gitRepoChanges(filepath.Join(p.cfg.Path, rel), base, ignoreWS)
 		if rc == nil {
 			continue
 		}
@@ -83,11 +88,18 @@ func (p *project) changes(base string) *projectChanges {
 		}
 	}
 	sort.Slice(pc.Files, func(i, j int) bool { return pc.Files[i].Rel < pc.Files[j].Rel })
+	if pr != nil {
+		pc.Base = pr.BaseRef
+	}
 	return pc
 }
 
-// branches lists the branches of all repos in the project, the root repo's first.
+// branches lists the branches of all repos in the project, the root repo's first. A pull request
+// has none to pick from; its base is fixed.
 func (p *project) branches() []string {
+	if p.pr() != nil {
+		return []string{}
+	}
 	p.mu.RLock()
 	repos := make([]string, 0, len(p.git))
 	for rel := range p.git {
@@ -109,8 +121,9 @@ func (p *project) branches() []string {
 }
 
 // gitRepoChanges diffs the repo at dir against where HEAD forked from base, including uncommitted
-// edits and untracked files. It returns nil outside a repo or before the first commit.
-func gitRepoChanges(dir, base string) *repoChanges {
+// edits and untracked files, optionally ignoring whitespace (git diff -w, as GitHub's "Hide
+// whitespace"). It returns nil outside a repo or before the first commit.
+func gitRepoChanges(dir, base string, ignoreWS bool) *repoChanges {
 	commit, label := gitBase(dir, base)
 	if commit == "" {
 		return nil
@@ -134,9 +147,31 @@ func gitRepoChanges(dir, base string) *repoChanges {
 		}
 	}
 
+	// Ignoring whitespace, name-status still lists files whose changes are all whitespace;
+	// numstat leaves them out
+	if ignoreWS && len(rc.Files) > 0 {
+		if out, err := gitOutput(dir, "diff", "--numstat", "-z", "--no-renames", "-w", commit); err == nil {
+			keep := map[string]bool{}
+			for _, rec := range strings.Split(string(out), "\x00") {
+				if f := strings.SplitN(rec, "\t", 3); len(f) == 3 {
+					keep[filepath.FromSlash(f[2])] = true
+				}
+			}
+			for rel, d := range rc.Files {
+				if d.Status == "M" && !keep[rel] {
+					delete(rc.Files, rel)
+				}
+			}
+		}
+	}
+
 	// Line runs, from one patch for the whole repo
 	if len(rc.Files) > 0 {
-		out, err := gitOutput(dir, "-c", "core.quotePath=false", "diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", "-U0", commit)
+		args := []string{"-c", "core.quotePath=false", "diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", "-U0"}
+		if ignoreWS {
+			args = append(args, "-w")
+		}
+		out, err := gitOutput(dir, append(args, commit)...)
 		if err == nil && len(out) <= maxDiffSize {
 			for path, changes := range parsePatch(string(out)) {
 				if d, ok := rc.Files[filepath.FromSlash(path)]; ok {

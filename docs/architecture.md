@@ -30,6 +30,7 @@ flowchart TB
 | `project.go` | Indexing (file tree, ignore rules, git status), fuzzy file search, gopls lifecycle per project. |
 | `lsp.go` | A minimal LSP client: process start, request/response matching, document sync. |
 | `discover.go` | Turns directories matching the `discover` globs into projects, every 30s. |
+| `github.go` | GitHub pull requests. `parsePRRef` reads links and `owner/repo#n`; `fetchPR` calls the API; `checkoutPR` fetches `refs/pull/<n>/head` and the base branch into a bare cache repo per GitHub repo (`~/.cache/codebrowse/github/<owner>/<repo>.git`) and checks the head out, detached, into a worktree per PR (`.../<repo>/pr-<n>`). The PR becomes a project with `projectConfig.PR` set, saved in the config. `githubToken(r)` is the one place GitHub credentials come from (config `github_token`, else `gh auth token`), and the seam for per-user GitHub sign-in later (plan: `~/Code/plans/261015-codebrowse-github-prs.md`). |
 | `gitdiff.go` | Changes against a base branch (one `git diff -U0` per repo) and the branch list. A chosen base that a repo lacks, or that starts with `-`, falls back to the default. |
 | `gowork.go` | Generates a `go.work` for a root that holds several modules but no `go.work`. |
 | `tour.go`, `tourstore.go` | `codebrowse tour` (validate a walkthrough, print its link) and the saved-tour list. |
@@ -150,8 +151,10 @@ All endpoints need the session cookie. Paths are absolute; `line` and `char` are
 | `GET /api/find` | `project`, `q` | Fuzzy file matches. |
 | `GET /api/file` | `project`, `path` | Content, display path, branch, mtime; `binary` for non-text or files over 8 MB. |
 | `GET /api/raw` | `project`, `path` | Image bytes, for the Markdown preview. |
-| `GET /api/changes` | `project`, `base` | Every changed file of every repo in the project, with status (`A`/`M`) and line runs (`add`, `mod`, `del`), against where HEAD forked from `base` (default: `main`, `master`, `origin/main` or `origin/master`). Untracked files count as added. |
-| `GET /api/branches` | `project` | Local, then remote branches of all repos in the project, for picking `base`. |
+| `GET /api/changes` | `project`, `base`, `whitespace` | Every changed file of every repo in the project, with status (`A`/`M`) and line runs (`add`, `mod`, `del`, each with a content `id` and the removed lines), against where HEAD forked from `base` (default: `main`, `master`, `origin/main` or `origin/master`). Untracked files count as added. Whitespace changes are ignored unless `whitespace=1`. |
+| `GET /api/branches` | `project` | Local, then remote branches of all repos in the project, for picking `base`. Empty for a pull request, whose base is fixed. |
+| `POST /api/github/pr` | JSON `{"ref"}`: a PR link or `owner/repo#n` | Fetches the PR and checks it out as a project (or updates the checkout), returns the project. 404 if GitHub does not know the PR or the token cannot read it. |
+| `GET /gh/<owner>/<repo>/pull/<n>` | | Redirects to `/#gh=<owner>/<repo>/<n>`, which the web app opens. Signed out, the login page brings you back to it. |
 | `GET /api/semantic` | `project`, `path` | gopls semantic tokens (+ legend). |
 | `GET /api/hints` | `project`, `path` | Parameter-name inlay hints. |
 | `GET /api/symbols` | `project`, `path` | Document symbols (structure, sticky header, breadcrumbs). |

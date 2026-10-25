@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -76,5 +77,30 @@ func TestHandleRaw_RejectsOutsideProject(t *testing.T) {
 	}
 	if rec := getRaw(mux, outside); rec.Code != http.StatusForbidden {
 		t.Fatalf("code = %d, want 403", rec.Code)
+	}
+}
+
+func TestAuthKeepsLinkThroughLogin(t *testing.T) {
+	s := &server{cfg: &config{Password: "pw", Secret: "s"}, projects: map[string]*project{}}
+	mux := http.NewServeMux()
+	s.routes(mux, http.NotFoundHandler())
+	h := s.auth(mux)
+
+	// Signed out, a link goes to the login page, which carries it along
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/gh/owner/repo/pull/7", nil))
+	if rec.Code != http.StatusFound || rec.Header().Get("Location") != "/login.html?next=%2Fgh%2Fowner%2Frepo%2Fpull%2F7" {
+		t.Fatalf("code %d, location %q", rec.Code, rec.Header().Get("Location"))
+	}
+
+	// Signing in returns to it; anything but a local path goes to the start page
+	for next, want := range map[string]string{"/gh/owner/repo/pull/7": "/gh/owner/repo/pull/7", "//evil.com/x": "/", "https://evil.com": "/", "/\\evil.com": "/", "": "/"} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("POST", "/login", strings.NewReader(url.Values{"password": {"pw"}, "next": {next}}.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		h.ServeHTTP(rec, req)
+		if rec.Header().Get("Location") != want {
+			t.Errorf("next %q: location %q, want %q", next, rec.Header().Get("Location"), want)
+		}
 	}
 }

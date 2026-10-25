@@ -46,6 +46,7 @@ function toast(msg, ms = 2600) {
 const ICON = {
   chev: '<svg viewBox="0 0 16 16" width="16" height="16"><path d="M6 4l4 4-4 4" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
   folder: '<svg class="ic" viewBox="0 0 16 16"><path d="M1.5 3.5h4.3l1.5 1.5h7.2v8.5h-13z" fill="none" stroke="#AFB1B3" stroke-width="1.1" stroke-linejoin="round"/></svg>',
+  pr: '<svg class="ic" viewBox="0 0 16 16"><circle cx="4.5" cy="3.5" r="1.6" fill="none" stroke="#57965C" stroke-width="1.2"/><circle cx="4.5" cy="12.5" r="1.6" fill="none" stroke="#57965C" stroke-width="1.2"/><circle cx="11.5" cy="12.5" r="1.6" fill="none" stroke="#57965C" stroke-width="1.2"/><path d="M4.5 5.1v5.8M11.5 10.9V6.5a2 2 0 00-2-2H7.5M9 3l-1.5 1.5L9 6" fill="none" stroke="#57965C" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
   folderIgn: '<svg class="ic" viewBox="0 0 16 16"><path d="M1.5 3.5h4.3l1.5 1.5h7.2v8.5h-13z" fill="none" stroke="#C9A26D" stroke-width="1.1" stroke-linejoin="round"/></svg>',
   module: '<svg class="ic" viewBox="0 0 16 16"><path d="M1.5 3.5h4.3l1.5 1.5h7.2v8.5h-13z" fill="none" stroke="#AFB1B3" stroke-width="1.1" stroke-linejoin="round"/><rect x="9" y="9" width="6" height="6" rx="1" fill="#3592C4"/></svg>',
   go: '<svg class="ic" viewBox="0 0 16 16"><path d="M3 1.5h7l3 3v10H3z" fill="#2A3B52" stroke="#4C9CE0" stroke-width="1"/><text x="8" y="12.2" text-anchor="middle" font-size="5.6" font-weight="700" fill="#7EC3FF" font-family="Inter,sans-serif">GO</text></svg>',
@@ -223,6 +224,7 @@ const S = {
   reviewList: [],       // keys of the changes marked reviewed, most recent last
   reviewed: new Set(),  // the same, for lookups
   chgFilter: store.get('chgFilter', 'all'), // which changes the arrows step through: 'all' or 'pending'
+  showWS: store.get('showWhitespace', false), // whitespace-only changes are hidden by default, as in a review
 };
 const MAX_REVIEWED = 20000;
 
@@ -313,9 +315,22 @@ function openProjectMenu(anchor) {
       if (open) walk(n.children, depth + 1);
     }
   };
-  walk(projectTree(S.projects), 0);
+  walk(projectTree(S.projects.filter(x => !x.pr)), 0);
+
+  // Pull requests, newest first
+  const prs = S.projects.filter(x => x.pr).sort((a, b) => b.pr.number - a.pr.number);
+  if (prs.length) {
+    if (items.length) items.push('sep');
+    items.push({ html: '<span class="mcheck"></span><span class="mfolder">Pull requests</span>', action: () => true });
+    for (const x of prs) items.push({
+      html: `<span class="mcheck">${x.id === S.pid ? '✓' : ''}</span>${ICON.pr}<span>${esc(x.pr.repo)}#${x.pr.number}</span><span class="msub">${esc(x.pr.title)}</span>`,
+      title: `${x.pr.owner}/${x.pr.repo}#${x.pr.number} by ${x.pr.author}: ${x.pr.title}`,
+      action: () => { if (x.id !== S.pid) switchProject(x.id); },
+    });
+  }
   if (items.length) items.push('sep');
   items.push({ html: '<span class="mcheck">+</span><span>Add Project…</span>', action: addProjectDialog });
+  items.push({ html: `<span class="mcheck">${ICON.pr}</span><span>Open Pull Request…</span>`, action: openPRDialog });
   if (p) {
     items.push('sep');
     items.push({ html: `<span class="mcheck">${p.show_ignored ? '✓' : ''}</span><span>Show Ignored &amp; Generated Files</span>`, action: async () => {
@@ -323,8 +338,8 @@ function openProjectMenu(anchor) {
       p.show_ignored = r.show_ignored; S.tree.clear(); refreshTree(true);
     } });
     items.push({ html: '<span class="mcheck">⟳</span><span>Reindex Project</span>', action: async () => { await api('projects/reindex', { project: p.id }, { method: 'POST' }); toast('Reindexing ' + p.name + '…'); setTimeout(() => refreshTree(true), 1500); } });
-    items.push({ html: `<span class="mcheck"></span><span>${p.auto ? 'Hide' : 'Remove'} “${esc(p.name)}” from List</span>`, action: async () => {
-      if (!confirm(`${p.auto ? 'Hide' : 'Remove'} project "${p.name}" from the list? Files on disk are not touched.`)) return;
+    items.push({ html: `<span class="mcheck"></span><span>${p.pr ? 'Close Pull Request' : `${p.auto ? 'Hide' : 'Remove'} “${esc(p.name)}” from List`}</span>`, action: async () => {
+      if (!confirm(p.pr ? `Close pull request "${p.name}"? Its checkout is deleted; open it again any time.` : `${p.auto ? 'Hide' : 'Remove'} project "${p.name}" from the list? Files on disk are not touched.`)) return;
       await api('projects', { project: p.id }, { method: 'DELETE' });
       store.set('tabs.' + p.id, []);
       await loadProjects();
@@ -352,6 +367,42 @@ function showMenu(anchor, items) {
   m.classList.remove('hidden');
 }
 const hideMenu = () => $('#menu').classList.add('hidden');
+
+// ---- GitHub pull requests: checked out as projects (see github.go)
+
+// openPR fetches a pull request (a link or owner/repo#n) and switches to it; opening one that is
+// open already fetches its latest pushes.
+async function openPR(ref) {
+  const label = ref.replace(/^https?:\/\/github\.com\//, '').replace(/\/(?:pull\/)?(\d+)$/, '#$1');
+  toast(`Fetching ${label} from GitHub…`, 600000);
+  let pc;
+  try { pc = await api('github/pr', {}, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ref }) }); }
+  catch (e) { toast(`Cannot open ${label}: ${e.message}`, 10000); return; }
+  await loadProjects();
+  history.replaceState(null, '', '#' + new URLSearchParams({ p: pc.id }));
+  if (pc.id !== S.pid) await switchProject(pc.id);
+  else { S.tree.clear(); refreshTree(true); loadChanges(); }
+  toast(`#${pc.pr.number}: ${pc.pr.title}`, 3000);
+}
+
+function openPRDialog() {
+  const back = $('#modalBack');
+  const m = document.createElement('div');
+  m.className = 'modal';
+  m.innerHTML = `<div class="form"><h2>Open Pull Request</h2>
+    <label>GitHub pull request</label><input class="ref" spellcheck="false" placeholder="https://github.com/owner/repo/pull/123 or owner/repo#123" autocomplete="off">
+    <div class="hint">Tip: in a PR link, replace <code>github.com</code> with <code>${esc(location.host)}/gh</code>.</div>
+    <div class="row-btns"><button class="btn cancel">Cancel</button><button class="btn primary ok">Open</button></div></div>`;
+  document.body.appendChild(m); back.classList.remove('hidden');
+  const input = $('.ref', m);
+  const close = () => { m.remove(); back.classList.add('hidden'); back.onclick = null; };
+  const submit = () => { const ref = input.value.trim(); if (!ref) return; close(); openPR(ref); };
+  back.onclick = close;
+  input.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); submit(); } if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+  $('.cancel', m).onclick = close;
+  $('.ok', m).onclick = submit;
+  input.focus();
+}
 
 function addProjectDialog() {
   const back = $('#modalBack');
@@ -662,7 +713,7 @@ async function loadChanges() {
   if (!S.pid) return;
   const pid = S.pid, seq = ++changesSeq;
   let res;
-  try { res = await api('changes', { project: pid, base: S.base }); } catch { return; }
+  try { res = await api('changes', { project: pid, base: S.base, ...(S.showWS ? { whitespace: '1' } : {}) }); } catch { return; }
   if (pid === S.pid && seq === changesSeq) setChanges(res);
 }
 function scheduleChanges() { clearTimeout(changesTimer); changesTimer = setTimeout(loadChanges, 300); }
@@ -745,6 +796,13 @@ function setChangeFilter(mode) {
   toast(mode === 'pending' ? 'Stepping through unreviewed changes' : 'Stepping through all changes', 1500);
 }
 
+function toggleWhitespace() {
+  S.showWS = !S.showWS;
+  store.set('showWhitespace', S.showWS);
+  loadChanges();
+  toast(S.showWS ? 'Showing whitespace changes' : 'Ignoring whitespace changes', 1500);
+}
+
 function openReviewMenu(anchor) {
   const check = on => `<span class="mcheck">${on ? '✓' : ''}</span>`;
   const item = (on, label, key, action) => ({ html: `${check(on)}<span>${esc(label)}</span>${key ? `<span class="msub">${esc(key)}</span>` : ''}`, action });
@@ -754,6 +812,8 @@ function openReviewMenu(anchor) {
   const items = [
     item(S.chgFilter === 'all', 'All changes', 'U', () => setChangeFilter('all')),
     item(S.chgFilter === 'pending', 'Unreviewed changes', 'U', () => setChangeFilter('pending')),
+    'sep',
+    item(!S.showWS, 'Ignore whitespace', 'W', toggleWhitespace),
     'sep',
   ];
   if (atChange) items.push(item(false, 'Toggle reviewed: change at caret', 'X', toggleReviewed));
@@ -801,7 +861,10 @@ function renderChangesWidget() {
   if (!c || !c.base) return;
   const n = c.files.length, total = S.chgStops.length;
   const done = S.chgStops.filter(st => S.reviewed.has(st.key)).length;
-  $('#tbBaseName').textContent = c.base;
+  const pr = proj() && proj().pr;
+  $('#tbBaseVs').textContent = pr ? `#${pr.number}` : 'vs';
+  $('#tbBaseName').textContent = pr ? `into ${c.base}` : c.base;
+  $('#tbBase').title = pr ? `${pr.title} (${pr.author})` : 'Branch to compare with';
   $('#chgCount').textContent = n ? `${n.toLocaleString()} file${n === 1 ? '' : 's'} changed` : 'No changes';
   $('#chgReviewed').textContent = n ? `, ${done}/${total} reviewed` : '';
   $('#chgReviewed').classList.toggle('all', n > 0 && done === total);
@@ -836,6 +899,17 @@ function updateChangePos() {
 }
 
 async function openBaseMenu(anchor) {
+  const pr = proj() && proj().pr;
+  if (pr) {
+    const it = (icon, label, sub, action) => ({ html: `<span class="mcheck">${icon}</span><span>${esc(label)}</span>${sub ? `<span class="msub">${esc(sub)}</span>` : ''}`, action });
+    showMenu(anchor, [
+      it('', `#${pr.number} ${pr.title}`, `${pr.author}, ${pr.head_ref} into ${pr.base_ref}`, () => true),
+      'sep',
+      it('↗', 'Open on GitHub', '', () => window.open(pr.url, '_blank', 'noopener')),
+      it('⟳', 'Fetch latest pushes', '', () => openPR(`${pr.owner}/${pr.repo}#${pr.number}`)),
+    ]);
+    return;
+  }
   let branches = [];
   try { branches = await api('branches', { project: S.pid }); } catch { /* the default still works */ }
   const pick = b => { S.base = b; store.set('base.' + S.pid, b); loadChanges(); };
@@ -1364,6 +1438,7 @@ const formatRanges = rs => rs.map(([a, b]) => a === b ? `${a + 1}` : `${a + 1}-$
 // resolveLink accepts an absolute path, or a path relative to the project (p may then be omitted
 // when the path is absolute: the project containing it is picked).
 function resolveLink(hp) {
+  if (hp.get('gh')) return { gh: hp.get('gh') }; // a pull request to open, from /gh/<owner>/<repo>/pull/<n>
   let pid = hp.get('p'), path = hp.get('f');
   const tour = hp.get('tour'), step = Math.max(0, (+hp.get('step') || 1) - 1);
   if (!path) return tour ? { tour, step } : (pid && S.projects.some(p => p.id === pid) ? { pid } : null);
@@ -1379,6 +1454,7 @@ function resolveLink(hp) {
 
 async function openDeepLink(link) {
   if (!link) return;
+  if (link.gh) { await openPR(link.gh); return; }
   if (!link.path && !link.tour) { if (link.pid !== S.pid) await switchProject(link.pid); return; }
   if (link.tour) {
     const ok = await loadTour(link.tour, link.step, !link.path);
@@ -2291,7 +2367,12 @@ function openFinder(mode = 'files') {
       }
       const r = await api('find', { project: p.id, q: raw }).catch(() => []);
       if (my !== seq) return;
-      items = r.map(x => ({ icon: fileIcon(basename(x.rel)), name: hiName(basename(x.rel), raw.includes('/') ? '' : raw), sub: dirname(x.rel), path: p.path + '/' + x.rel, line: lineNo }));
+      // Changed files first, colored as in the tree
+      const changed = S.changes ? S.changes.files.filter(c => c.path === p.path + '/' + c.rel).map(c => c.rel) : [];
+      items = changedFirst(r.map(x => x.rel), changed, raw).map(rel => {
+        const cls = changeClass(p.path + '/' + rel);
+        return { icon: fileIcon(basename(rel)), name: (cls ? `<span class="${cls}">` : '<span>') + hiName(basename(rel), raw.includes('/') ? '' : raw) + '</span>', sub: dirname(rel), path: p.path + '/' + rel, line: lineNo };
+      });
       sel = 0; render();
     } else if (mode === 'symbols') {
       if (!raw) { items = []; render('Type to search symbols across the workspace (needs gopls)'); return; }
@@ -2349,7 +2430,7 @@ function openHelp() {
     ['Ctrl+E', 'Recent files'], ['Ctrl+F12', 'File structure'], ['Alt+F1', 'Select opened file in project tree'], ['Click / Shift+Click line number', 'Highlight a line / range (Ctrl+Click adds a range); the URL becomes a deep link'],
     ['Alt+Shift+C', 'Copy deep link to the highlighted lines, selection or caret line'], ['F8 / Shift+F8', 'Next / previous walkthrough step'],
     ['Alt+1', 'Focus project tree'], ['Esc', 'Close popup / usages pane, back to editor'], ['Ctrl+F', 'Find in file (browser find)'],
-    ['Hover', 'Quick documentation'], ['Ctrl+Scroll', 'Zoom the editor font or the Markdown preview (Ctrl+0 resets)'], ['Alt+↓ / Alt+↑', 'Next / previous change against the base branch, across files (also F7 / Shift+F7)'], ['Ctrl+Alt+Shift+↓ / ↑', 'Next / previous change in this file'], ['X or Y / Shift+X or Shift+Y', 'Mark the change at the caret / the whole file as reviewed and go to the next unreviewed change (again to clear)'], ['U', 'Step through all changes or only unreviewed ones'], ['D', 'Show / hide the old code of the change at the caret (or hover its gutter marker)'], ['Middle-click tab', 'Close tab'],
+    ['Hover', 'Quick documentation'], ['Ctrl+Scroll', 'Zoom the editor font or the Markdown preview (Ctrl+0 resets)'], ['Alt+↓ / Alt+↑', 'Next / previous change against the base branch, across files (also F7 / Shift+F7)'], ['Ctrl+Alt+Shift+↓ / ↑', 'Next / previous change in this file'], ['X or Y / Shift+X or Shift+Y', 'Mark the change at the caret / the whole file as reviewed and go to the next unreviewed change (again to clear)'], ['U', 'Step through all changes or only unreviewed ones'], ['W', 'Ignore whitespace changes (on by default) or show them'], ['D', 'Show / hide the old code of the change at the caret (or hover its gutter marker)'], ['Middle-click tab', 'Close tab'],
   ];
   m.innerHTML = `<div class="help"><h2>Keyboard shortcuts</h2>${rows.map(r => `<kbd>${esc(r[0])}</kbd><span>${esc(r[1])}</span>`).join('')}</div>`;
   document.body.appendChild(m);
@@ -2390,8 +2471,9 @@ function updateStatusBar() {
   updateChangePos();
   updateLinkButton();
   $('#sbIndent').textContent = f ? f.indent : '';
-  $('#tbBranchName').textContent = f && f.branch ? f.branch : '';
-  $('#tbBranch').style.visibility = f && f.branch ? '' : 'hidden';
+  const branch = proj() && proj().pr ? proj().pr.head_ref : f && f.branch; // a PR checkout is detached
+  $('#tbBranchName').textContent = branch || '';
+  $('#tbBranch').style.visibility = branch ? '' : 'hidden';
   const p = proj();
   const crumbs = $('#sbCrumbs');
   if (f && p) {
@@ -2443,6 +2525,7 @@ function initKeys() {
     else if (e.altKey && !mod && !e.shiftKey && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) { e.preventDefault(); goChange(e.key === 'ArrowUp' ? -1 : 1); }
     else if (!mod && !e.altKey && (k === 'x' || k === 'y') && !document.querySelector('.modal')) { e.preventDefault(); e.shiftKey ? toggleFileReviewed() : toggleReviewed(); }
     else if (!mod && !e.altKey && !e.shiftKey && k === 'd' && !document.querySelector('.modal')) { e.preventDefault(); toggleOldCode(); }
+    else if (!mod && !e.altKey && !e.shiftKey && k === 'w' && !document.querySelector('.modal')) { e.preventDefault(); toggleWhitespace(); }
     else if (!mod && !e.altKey && !e.shiftKey && k === 'u' && !document.querySelector('.modal')) { e.preventDefault(); setChangeFilter(S.chgFilter === 'pending' ? 'all' : 'pending'); }
     else if (mod && e.altKey && e.shiftKey && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) { e.preventDefault(); goFileChange(e.key === 'ArrowUp' ? -1 : 1); }
     else if (e.altKey && !mod && e.key === 'F1') { e.preventDefault(); locateInTree(); }

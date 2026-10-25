@@ -37,13 +37,19 @@ It is a single Go binary with no dependencies outside the standard library. The 
   - Relative links open the file in codebrowse; `file.go#L10-L20` highlights those lines and `other.md#section` jumps to that heading.
   - The last mode you picked is used for the next Markdown file you open.
 - **Changes against main**, as in IntelliJ:
-  - Thin bars next to the line numbers mark lines added (green) or changed (blue) on your branch, and a grey wedge marks deleted lines.
+  - Thin bars next to the line numbers mark lines added (green) or changed (blue) on your branch, and a red marker marks deleted lines.
   - Changed files are colored in the tree and tabs, and so are the folders that contain them.
   - The left/right arrows at the top right (or **Alt+↓/↑**, **F7** / **Shift+F7**) jump to the next or previous change across all files and reveal the file in the tree. The up/down arrows next to them (or **Ctrl+Alt+Shift+↓/↑**) cycle through the changes in the open file. Each shows where you are, e.g. `2/27`.
   - Review marks, like GitHub's "Viewed": **X** or **Y** (or the checkbox next to the up/down arrows) checks off the change at the caret and jumps to the next unreviewed one ("No more changes" when none are left), **Shift+X** / **Shift+Y** does the same for the whole file; press again on a checked change to clear it. Reviewed changes get a faint gutter bar, fully reviewed files a check in the tree and tabs, and the top bar counts e.g. `3/12 reviewed`. A mark follows the change's content, so it stays when other lines move and clears when the change itself is edited. Marks are kept in the browser, per project.
   - Hover the blue or gray gutter marker of a change (or click it, or press **D** with the caret in the change) to see the old code from the base branch in a popup.
   - The filter left of the arrows (or **U**) switches between stepping through all changes and only the unreviewed ones, for a review done entirely from the keyboard: read, **X**, read, **X**, ...
+  - Whitespace-only changes are ignored by default, like GitHub's "Hide whitespace"; **W** or the filter menu shows them.
   - The comparison is against where your branch left `main` (or `master`, `origin/main`, `origin/master`), including uncommitted edits; on `main` itself it shows uncommitted edits only. The "vs main" dropdown next to the arrows picks another branch, remembered per project.
+- **GitHub pull requests**, including private repos:
+  - Open one by replacing `github.com` with `<codebrowse>/gh` in a PR link, e.g. `http://devbox:7878/gh/owner/repo/pull/123`, or with **Open Pull Request...** in the project menu (a link or `owner/repo#123`).
+  - The PR is checked out under `~/.cache/codebrowse/github/` and becomes a project, so go to definition, usages and everything under "Changes against main" work on it. The diff is GitHub's: against the PR's base branch, also for merged PRs.
+  - The top bar shows `#123 into main`; its menu opens the PR on GitHub or fetches the latest pushes (opening the link again does the same). **Close Pull Request** in the project menu deletes the checkout.
+  - Private repos need a GitHub token: `github_token` in the config, or a signed-in [GitHub CLI](https://cli.github.com) (`gh auth login`), which codebrowse asks for its token.
 - **Zoom**: Ctrl+Scroll (or pinch) over the editor or the Markdown preview zooms just that pane, not the whole page. Ctrl+0 resets it.
 
 | Changes and review marks | Old code of a changed section | Review filter |
@@ -162,6 +168,7 @@ The config file is `~/.config/codebrowse/config.json`. It is created on first st
 | `projects` | Projects added by hand, through the UI or this file. |
 | `discover` | Globs. Every matching directory becomes a project; this is checked every 30s. |
 | `hidden` | Discovered directories you removed from the project list. |
+| `github_token` | Token for GitHub pull requests in private repos (read access to contents and pull requests). Without it, codebrowse uses `gh auth token`, and without that, only public repos work. |
 
 Resource use:
 - **Indexing:** a project is not indexed until you first open it, and stops re-indexing after 30 minutes without use.
@@ -177,7 +184,8 @@ codebrowse serves source code, so treat it like SSH access:
 - Every page and API call needs the password. After login, a session cookie lasts 90 days.
 - Files can only be read inside a configured project, `GOROOT` or `GOMODCACHE`.
 - There is **no TLS**. If you bind to `0.0.0.0`, the password and your code travel unencrypted. Prefer `127.0.0.1` plus an SSH tunnel (`ssh -L 7878:localhost:7878 devbox`), or put it behind a TLS reverse proxy.
-- Anyone who can log in can add any directory the service user can read as a project.
+- Anyone who can log in can add any directory the service user can read as a project, and open any pull request the GitHub token can read.
+- The GitHub token stays on the server. It reaches git through environment variables, never the command line or the browser.
 
 ## Development
 
@@ -195,6 +203,7 @@ make restart                                                    # deploy to the 
 | `server.go` | HTTP routes, auth and the JSON API. |
 | `project.go` | Indexing, ignore rules, git branch/dirty status, fuzzy file search. |
 | `discover.go` | Project auto-discovery. |
+| `github.go` | GitHub pull requests: parse links, call the API, fetch and check out PRs as projects. |
 | `lsp.go` | A minimal LSP client for gopls (JSON-RPC over stdio). |
 | `gowork.go` | The generated `go.work` for directories of repos. |
 | `tour.go` | `codebrowse tour`: validates a walkthrough and prints its link. |
